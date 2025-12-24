@@ -1,0 +1,131 @@
+# ===============================
+# TrafficSentinel Configuration
+# ===============================
+
+# -------------------------------
+# Capture settings (PCAP mode)
+# -------------------------------
+capture:
+  interface: "eth0"                 # Network interface to capture
+  pcap_dir: "./pcap"                # Directory for PCAP files
+  slice_seconds: 60                 # Capture duration per slice (seconds)
+  tcpdump_path: "tcpdump"           # Path to tcpdump binary
+  tshark_path: "tshark"             # Path to tshark binary
+  bpf_filter: "tcp or udp"          # BPF filter
+  snaplen: 0                        # 0 = full packet (-s 0)
+
+# -------------------------------
+# Ingestion mode (HTTPS support)
+# -------------------------------
+ingestion:
+  mode: "log"                       # "pcap" or "log"
+  log_source: "access"              # "access" or "jsonl"
+
+  # ✅ Default: Nginx host logs mounted to /hostlogs (read-only)
+  # Most common nginx access log:
+  log_path: "/hostlogs/access.log"
+
+  # If your nginx file name differs, change log_path:
+  # - Host: /var/log/nginx/site-access.log
+  #   Container: /hostlogs/site-access.log
+  # log_path: "/hostlogs/site-access.log"
+
+  # If you want a rotated log (NOT recommended for live tailing):
+  # - Host: /var/log/nginx/access.log.1
+  #   Container: /hostlogs/access.log.1
+  # log_path: "/hostlogs/access.log.1"
+
+  # For rotated logs: better to ingest the current file (access.log).
+  # Offset file handles continuous reading. If file truncates, tailer resets safely.
+
+  # Stateful tail offset (prevents reprocessing)
+  offset_file: "./state/log_offset.json"
+
+  # Max lines read per loop
+  batch_lines: 2000
+
+  # Bruteforce detection from logs (best when status codes exist)
+  bruteforce:
+    enabled: true
+    threshold_per_minute: 10
+    fail_statuses: [401, 403]
+    endpoints:
+      - "/login"
+      - "/signin"
+      - "/auth"
+      - "/api/auth"
+      - "/wp-login.php"
+      - "/admin"
+      - "/administrator"
+
+# -------------------------------
+# Detection rules
+# -------------------------------
+rules:
+  compiled_rules_path: "./config/rules_compiled.yml"
+  custom_rules_path: "./config/rules_custom.yml"
+
+# -------------------------------
+# Reputation / penalty system
+# -------------------------------
+reputation:
+  ban_threshold: 7                  # Points to trigger ban
+  ban_seconds: 3600                 # Temporary ban duration (seconds)
+  ban_limit: 3                      # Permanent ban after N bans
+  decay_seconds: 3600               # Reset penalty after inactivity
+
+# -------------------------------
+# Allowlist (never banned)
+# -------------------------------
+allowlist:
+  - "127.0.0.1"
+  # - "YOUR_PUBLIC_IP"
+  # - "MONITORING_IP"
+
+# -------------------------------
+# Firewall enforcement
+# -------------------------------
+enforcement:
+  mode: "iptables"                  # iptables only (for now)
+  chain: "INPUT"                    # Base chain
+  ts_chain: "TS_BLOCK"              # TrafficSentinel chain
+
+# -------------------------------
+# Logging
+# -------------------------------
+logging:
+  events_log: "./state/events.log"
+  actions_log: "./state/actions.log"
+  error_log: "./state/error.log"
+  reputation_file: "./state/reputation.json"
+
+# -------------------------------
+# Scoring behavior
+# -------------------------------
+scoring:
+  mode: "per_request"               # per_request = max +1 per request
+
+# -------------------------------
+# PCAP metadata detections (HTTPS-friendly)
+# -------------------------------
+pcap_metadata:
+  enabled: true
+
+  portscan:
+    threshold_unique_ports: 20      # unique dst ports from same src in one slice => port scan (+1)
+    score: 1
+
+  synflood:
+    threshold_syn_packets: 200      # SYN packets from same src in one slice => SYN flood (+1)
+    score: 1
+
+allowlist:
+  # Never ban these (admins/monitoring)
+  static:
+    - "127.0.0.1"
+
+  # Trusted testers / developers (IPs or CIDR ranges)
+  trusted_testers:
+    - "192.168.1.0/24"
+    # - "203.0.113.10"
+    # - "198.51.100.0/24"

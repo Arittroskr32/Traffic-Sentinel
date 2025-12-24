@@ -1,0 +1,41 @@
+services:
+  trafficsentinel:
+    build: .
+    container_name: trafficsentinel
+    restart: unless-stopped
+
+    # Needed for tcpdump + iptables
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    # Best for sniffing traffic on the host interfaces
+    network_mode: host
+
+    # Often needed for iptables inside container (especially with host net)
+    privileged: true
+
+    environment:
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      # Project mounts
+      - ./config:/app/config
+      - ./state:/app/state
+      - ./pcap:/app/pcap
+      - ./vendor:/app/vendor
+
+      # ---------------------------------------
+      # Option A (Recommended): Nginx host logs
+      # ---------------------------------------
+      # Mount the directory (recommended, not a single file):
+      - /var/log/nginx:/hostlogs:ro
+
+      # If your nginx logs are elsewhere, change host path:
+      # - /custom/path/to/nginx/logs:/hostlogs:ro
+
+      # ---------------------------------------
+      # Option B: Apache host logs
+      # ---------------------------------------
+      # Uncomment this and comment the nginx one above:
+      # - /var/log/apache2:/hostlogs:ro

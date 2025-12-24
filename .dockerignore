@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+pcap/
+state/*.log
+state/reputation.json
+.git/

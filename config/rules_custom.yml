@@ -1,0 +1,16 @@
+version: 1
+
+rules:
+  - category: "ssti"
+    id: "ssti-01"
+    score: 1
+    targets: ["uri", "body", "headers"]
+    patterns:
+      - "{{"
+      - "}}"
+      - "${"
+      - "<#"
+      - "#{"
+      - "__class__"
+      - "__mro__"
+      - "__subclasses__"
