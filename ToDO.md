@@ -1,12 +1,18 @@
+![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
+![Docker](https://img.shields.io/badge/docker-supported-blue.svg)
+![Security](https://img.shields.io/badge/security-defense-critical)
+![Status](https://img.shields.io/badge/status-active-success.svg)
+
 # TrafficSentinel
 
-TrafficSentinel is a **rule-based traffic detection and enforcement system** designed to detect web attacks, abuse, and automated threats in real time and apply automated penalties and bans.
+TrafficSentinel is a **rule-based traffic detection and automated enforcement system** designed to detect web attacks, abuse, and automated threats in real time, assign penalties, and apply firewall-based bans.
 
-It is built to work in **two complementary modes**:
-- **PCAP capture mode** (plaintext HTTP + network metadata)
-- **Log ingestion mode** (HTTPS-capable, recommended)
+It is intentionally **simple, explainable, and deterministic**, focusing on practical security enforcement rather than opaque ML or anomaly-based models.
 
-The system continuously observes traffic, assigns penalties based on detected threats, and enforces temporary or permanent bans via the firewall.
+TrafficSentinel operates in **two complementary modes**:
+
+- **PCAP Capture Mode** — network-level visibility (plaintext HTTP + metadata)
+- **Log Ingestion Mode (Recommended)** — full HTTPS-capable application-layer detection
 
 ---
 

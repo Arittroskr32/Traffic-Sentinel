@@ -72,7 +72,7 @@ def _expand_targets(rule_targets: List[str]) -> List[str]:
     """
     Expand rule targets automatically so you don't need to edit rule YAML.
 
-    - If rule targets 'headers', also scan headers_kv + cookies + cookies_params
+    - If rule targets 'headers', also scan headers_kv + user_agent + cookies + cookies_params
     - If rule targets 'uri', also scan path + query + query_params
     - Always include 'combined' as a catch-all
     """
@@ -84,6 +84,10 @@ def _expand_targets(rule_targets: List[str]) -> List[str]:
     if "headers" in out:
         if "headers_kv" not in out:
             out.append("headers_kv")
+        # Always scan User-Agent separately so it can be down-weighted / ignored
+        # for bans when it's the only evidence.
+        if "user_agent" not in out:
+            out.append("user_agent")
         if "cookies" not in out:
             out.append("cookies")
         if "cookies_params" not in out:
@@ -117,7 +121,9 @@ def scan_request(
     target_map = build_target_map(uri=uri, headers=headers, body=body)
 
     hits: List[Dict[str, Any]] = []
-    seen_categories: Set[str] = set()
+    # Track evidence separately so User-Agent-only matches don't ban real users.
+    seen_categories_non_ua: Set[str] = set()
+    seen_categories_ua: Set[str] = set()
 
     hit_count = 0
     for rule in rules:
@@ -137,7 +143,10 @@ def scan_request(
                         "matched": getattr(pat, "pattern", str(pat)),
                         "snippet": text[:160],
                     })
-                    seen_categories.add(rule.category)
+                    if target == "user_agent":
+                        seen_categories_ua.add(rule.category)
+                    else:
+                        seen_categories_non_ua.add(rule.category)
                     hit_count += 1
                     if hit_count >= MAX_HITS_PER_REQUEST:
                         break
@@ -146,7 +155,7 @@ def scan_request(
         if hit_count >= MAX_HITS_PER_REQUEST:
             break
 
-    # CMDi heuristic
+    # CMDi heuristic (uses combined, which excludes UA now)
     _load_command_words_once()
     unix_cmds = _UNIX_CMDS or set()
     win_cmds = _WIN_CMDS or set()
@@ -176,17 +185,26 @@ def scan_request(
             "matched": "separator+cmdword",
             "snippet": cmd_hit,
         })
-        seen_categories.add("cmdi")
+        seen_categories_non_ua.add("cmdi")
+
+    # --- False-positive guard: UA-only evidence should NOT penalize/ban ---
+    # If *all* matches came from the User-Agent bucket, we keep the hits for
+    # visibility but return score_total=0 and categories=[].
+    ua_only_suppressed = bool(seen_categories_ua) and not bool(seen_categories_non_ua)
+
+    effective_categories = set() if ua_only_suppressed else set(seen_categories_non_ua)
 
     if mode == "per_request":
-        score_total = 1 if seen_categories else 0
+        score_total = 1 if effective_categories else 0
     else:
-        score_total = len(seen_categories)
+        score_total = len(effective_categories)
 
     return {
         "ip": ip,
         "score_total": score_total,
-        "categories": sorted(seen_categories),
+        "categories": sorted(effective_categories),
         "hits": hits,
         "scoring_mode": mode,
+        "ua_only_suppressed": ua_only_suppressed,
+        "ua_categories": sorted(seen_categories_ua),
     }

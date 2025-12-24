@@ -1,1 +1,16 @@
-curl -k "https://YOUR_DOMAIN/?q=1%27%20OR%201=1--" -s -o /dev/null curl -k "https://YOUR_DOMAIN/?q=%3Cscript%3Ealert(1)%3C/script%3E" -s -o /dev/null why i am using ?q. why it trigger only on this. it should triger alawys someone make a bad request in any parameeter like in post comment, headers, or any other place. where xss,sql, ssti, rce anything can happend. i mean try to look all data stream and in the manual payload that is inserted by the user check that for any endpoint. for this where to update code tell me and give updated full code for that
+
+3) Small consistency nits (won’t crash, but worth cleaning)
+
+In PCAP extraction you store header key user_agent (underscore) instead of typical user-agent. It won’t break detection since you scan header values + combined, but it’s slightly inconsistent with access/jsonl headers.
+
+Your repo zip includes a .git/ directory, but your .dockerignore correctly excludes it from docker builds. (For sharing zips, excluding .git is still nicer.)
+
+✅ Bottom line
+
+Your codebase is structurally correct and functionally consistent with the project goal. The main problems are documentation mismatches, especially:
+
+CLI commands
+
+log ingestion defaults (access vs jsonl)
+
+If you want, I can rewrite the README “Admin CLI” + “Log Mode Setup” sections so they exactly match your current implementation (no guessing, no broken commands).

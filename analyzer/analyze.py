@@ -89,8 +89,12 @@ def extract_requests_from_pcap(pcap_file: str) -> List[Dict[str, Any]]:
         headers: Dict[str, str] = {}
         if host:
             headers["host"] = host
+
+        # Use canonical header name (hyphenated) to match access/jsonl schemas.
+        # (Normalizer also accepts legacy underscore variants.)
         if ua:
-            headers["user_agent"] = ua
+            headers["user-agent"] = ua
+
         if cookie:
             headers["cookie"] = cookie
         if req_line:

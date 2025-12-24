@@ -99,19 +99,29 @@ def _cookie_pairs(cookie_header: str) -> str:
 def _headers_targets(headers: Any) -> Dict[str, str]:
     """
     Returns:
-      - headers_values: just values joined
-      - headers_kv: "key: value" lines (includes header names)
+      - headers_values: just values joined (EXCLUDES user-agent)
+      - headers_kv: "key: value" lines (EXCLUDES user-agent)
       - cookies_raw: cookie header normalized (if present)
       - cookies_params: parsed cookie pairs
+      - user_agent: dedicated normalized UA bucket
     """
     values: List[str] = []
     kv: List[str] = []
     cookie_raw = ""
+    user_agent_raw = ""
 
     if isinstance(headers, dict):
         for k, v in headers.items():
             ks = normalize(k)["normalized"]
             vs = normalize(v)["normalized"]
+
+            # Keep User-Agent in a dedicated target bucket so it can be
+            # down-weighted / ignored for bans if it's the *only* evidence.
+            # Also accept legacy underscore keys from older PCAP extraction.
+            if ks in ("user-agent", "user_agent", "useragent"):
+                if not user_agent_raw:
+                    user_agent_raw = _safe_str(v)
+                continue
 
             if vs:
                 values.append(vs)
@@ -132,6 +142,7 @@ def _headers_targets(headers: Any) -> Dict[str, str]:
         "headers_kv": "\n".join(kv).strip(),
         "cookies_raw": normalize(cookie_raw, querystring_mode=True)["normalized"],
         "cookies_params": _cookie_pairs(cookie_raw),
+        "user_agent": normalize(user_agent_raw)["normalized"],
     }
 
 
@@ -139,12 +150,14 @@ def build_target_map(uri: str, headers: Any, body: Any) -> Dict[str, str]:
     """
     Unified scan buckets.
     These keys are what detector can scan: uri, path, query, query_params,
-    headers, headers_kv, cookies, cookies_params, body, combined
+    headers, headers_kv, cookies, cookies_params, user_agent, body, combined
     """
     up = _parse_uri(uri)
     hp = _headers_targets(headers)
     bp = normalize(body)["normalized"]
 
+    # IMPORTANT: combined intentionally excludes User-Agent to reduce false
+    # positives (UA strings can contain tokens that match broad patterns).
     combined = " ".join([
         up["uri"],
         up["path"],
@@ -163,15 +176,16 @@ def build_target_map(uri: str, headers: Any, body: Any) -> Dict[str, str]:
         "query": up["query"],
         "query_params": up["query_params"],
 
-        # Headers: keep old key "headers" as VALUES ONLY (backward compatible)
+        # Headers (EXCLUDES user-agent)
         "headers": hp["headers_values"],
-
-        # New: includes header NAMES too
         "headers_kv": hp["headers_kv"],
 
         # Cookies
         "cookies": hp["cookies_raw"],
         "cookies_params": hp["cookies_params"],
+
+        # User-Agent (dedicated)
+        "user_agent": hp.get("user_agent", ""),
 
         # Body + catch-all
         "body": bp,

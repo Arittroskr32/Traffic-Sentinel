@@ -14,6 +14,7 @@ from ingestor.log_reader import tail_lines
 from ingestor.parsers import parse_lines
 from ingestor.bruteforce import detect_bruteforce
 
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.yml")
 
@@ -72,6 +73,9 @@ def process_results(results, state, logs, now):
         hits = result.get("hits", [])
         cats = evidence_categories(result)
 
+        # NEW: Track UA-only suppression if detector provides it
+        ua_only = bool(result.get("ua_only_suppressed", False))
+
         if not ip:
             continue
 
@@ -80,17 +84,26 @@ def process_results(results, state, logs, now):
 
         # Optional full telemetry log (includes score=0)
         if all_log:
-            append_log(all_log, f"{now} ip={ip} score={score} cats={cats} hits={len(hits)}")
+            append_log(
+                all_log,
+                f"{now} ip={ip} score={score} cats={cats} hits={len(hits)} ua_only={int(ua_only)}",
+            )
 
         # ✅ Only log suspicious/malicious events
         if score > 0:
-            append_log(events_log, f"{now} ip={ip} score={score} cats={cats} hits={len(hits)}")
+            append_log(
+                events_log,
+                f"{now} ip={ip} score={score} cats={cats} hits={len(hits)} ua_only={int(ua_only)}",
+            )
 
         was_banned = state_is_banned(entry_before, now=now) if entry_before else False
         is_now_banned = state_is_banned(entry_after, now=now)
 
         if not was_banned and is_now_banned:
-            append_log(actions_log, f"{now} action=ban ip={ip} permanent={entry_after.get('permanent', False)} reason=cats:{cats}")
+            append_log(
+                actions_log,
+                f"{now} action=ban ip={ip} permanent={entry_after.get('permanent', False)} reason=cats:{cats}",
+            )
         elif was_banned and not is_now_banned:
             append_log(actions_log, f"{now} action=unban ip={ip} reason=expired")
 
@@ -153,7 +166,12 @@ def main_loop():
                     threshold = int(bf_cfg.get("threshold_per_minute", 10))
                     fail_statuses = tuple(int(x) for x in (bf_cfg.get("fail_statuses") or [401, 403]))
 
-                    bf = detect_bruteforce(events, endpoints=endpoints, threshold_per_minute=threshold, fail_statuses=fail_statuses)
+                    bf = detect_bruteforce(
+                        events,
+                        endpoints=endpoints,
+                        threshold_per_minute=threshold,
+                        fail_statuses=fail_statuses,
+                    )
                     for ip, score in bf.items():
                         results.append({
                             "ip": ip,
@@ -196,7 +214,10 @@ def main_loop():
                             if os.path.exists(pcap_file):
                                 os.remove(pcap_file)
                         except Exception as e:
-                            append_log(error_log, f"{int(time.time())} pcap_delete_failed file={pcap_file} err={repr(e)}")
+                            append_log(
+                                error_log,
+                                f"{int(time.time())} pcap_delete_failed file={pcap_file} err={repr(e)}",
+                            )
 
         except Exception as e:
             append_log(error_log, f"{int(time.time())} loop_failed mode={mode} err={repr(e)}")

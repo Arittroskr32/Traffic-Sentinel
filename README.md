@@ -4,7 +4,7 @@
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 # TrafficSentinel
 
-TrafficSentinel is a **rule-based traffic detection and automated enforcement system** designed to detect web attacks, abuse, and automated threats in real time, assign penalties, and apply firewall-based bans.
+TrafficSentinel is a **rule-based traffic detection and automated enforcement system** designed to detect web attacks, abuse, and automated threats in real time, assign penalties, and auto-ban IPs based on URI + headers + body firewall-based bans.
 
 It is intentionally **simple, explainable, and deterministic**, focusing on practical security enforcement rather than opaque ML models.
 
@@ -12,6 +12,8 @@ TrafficSentinel operates in **two complementary modes**:
 
 - **PCAP Capture Mode** — network-level visibility (plaintext HTTP + metadata)
 - **Log Ingestion Mode (Recommended)** — full HTTPS-capable application-layer detection
+- **Auto-ban via iptables** (iptables TS_BLOCK)
+- **Detection inputs: URI, headers, body**
 
 ---
 
@@ -201,10 +203,22 @@ python scripts/compile_rules.py
 
 ## Deployment
 
+### Runtime requirements (Linux host)
+
+TrafficSentinel needs elevated networking permissions to capture traffic and enforce bans:
+
+- `network_mode: host` (required for capture visibility + correct source IPs)
+- `cap_add: NET_ADMIN, NET_RAW` (required for `iptables` + packet capture)
+- `privileged: true` is used in this compose setup for simplicity (allows iptables/capture to work reliably)
+
+If you remove these, **PCAP capture and/or auto-banning will fail** (tcpdump/tshark won’t see traffic properly and iptables rules may not apply).
+
+
 ### Docker (Recommended)
 
 ```
-docker-compose up -d
+docker compose up -d
+or, docker-compose up -d
 ```
 
 ## Create the JSONL file on host:
@@ -238,6 +252,8 @@ Config:
 ```yaml
 log_path: /hostlogs/access.log
 ```
+**Alternative (basic):** You can ingest classic `access.log`, but detection will be mostly limited to path/query + limited metadata.
+
 
 ### Systemd (Optional)
 
@@ -247,7 +263,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable trafficsentinel
 sudo systemctl start trafficsentinel
 ```
-## ## Architecture Overview
+## Architecture Overview
 
 TrafficSentinel follows a simple, modular pipeline:
 ```
@@ -289,9 +305,9 @@ TrafficSentinel provides a built-in CLI for manual administration:
 ```
 python cli.py show-top
 python cli.py status <IP>
-python cli.py unban <IP>
 python cli.py clear-penalty <IP>
-python cli.py allowlist ( list/ add ip/ remove ip )
+python cli.py unban <IP> [--force]
+python cli.py allowlist list|add|remove
 ```
 
 Used for inspection, overrides, and maintenance.
