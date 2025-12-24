@@ -18,25 +18,13 @@ capture:
 # Ingestion mode (HTTPS support)
 # -------------------------------
 ingestion:
-  # Use "log" mode for HTTPS-friendly ingestion
-  mode: "log"
-
-  # For Option A: JSONL produced by your app/proxy logger
-  log_source: "jsonl"
-
-  # This file must exist on the HOST at:
-  #   /var/log/nginx/trafficsentinel.jsonl
-  # ...and is mounted into container via:
-  #   - /var/log/nginx:/hostlogs:ro
+  mode: "log"          # "pcap" or "log"
+  log_source: "jsonl"  # "access" or "jsonl"
   log_path: "/hostlogs/trafficsentinel.jsonl"
 
-  # Stateful tail offset (prevents reprocessing)
   offset_file: "./state/log_offset.json"
-
-  # Max lines read per loop
   batch_lines: 2000
 
-  # Bruteforce detection from logs (works well when status codes exist)
   bruteforce:
     enabled: true
     threshold_per_minute: 10
@@ -69,7 +57,6 @@ reputation:
 # -------------------------------
 # Allowlist (never banned)
 # -------------------------------
-# IMPORTANT: only ONE allowlist key (no duplicates)
 allowlist:
   static:
     - "127.0.0.1"
@@ -88,29 +75,26 @@ enforcement:
 # Logging
 # -------------------------------
 logging:
-  events_log: "./state/events.log"
+  events_log: "./state/events.log"            # ✅ only score>0 events
   actions_log: "./state/actions.log"
   error_log: "./state/error.log"
   reputation_file: "./state/reputation.json"
+  all_requests_log: "./state/all_requests.log"  # ✅ optional: logs everything
 
 # -------------------------------
 # Scoring behavior
 # -------------------------------
 scoring:
-  # per_request = max +1 per request (you are using this)
   mode: "per_request"
 
 # -------------------------------
-# PCAP metadata detections (HTTPS-friendly)
-# (still usable if you switch ingestion.mode back to pcap)
+# PCAP metadata detections (optional)
 # -------------------------------
 pcap_metadata:
   enabled: true
-
   portscan:
     threshold_unique_ports: 20
     score: 1
-
   synflood:
     threshold_syn_packets: 200
     score: 1

@@ -57,8 +57,14 @@ def enforce_state(state: dict, now: int):
 
 
 def process_results(results, state, logs, now):
+    """
+    ✅ events.log: only suspicious (score > 0)
+    ✅ all_requests_log (optional): logs everything (score can be 0)
+    ✅ actions.log: ban/unban transitions
+    """
     events_log = logs.get("events_log", "./state/events.log")
     actions_log = logs.get("actions_log", "./state/actions.log")
+    all_log = logs.get("all_requests_log")  # optional
 
     for result in results:
         ip = result.get("ip", "")
@@ -72,7 +78,13 @@ def process_results(results, state, logs, now):
         entry_before = state.get(ip, {}).copy()
         entry_after = update_ip_state(state, ip, score, now=now)
 
-        append_log(events_log, f"{now} ip={ip} score={score} cats={cats} hits={len(hits)}")
+        # Optional full telemetry log (includes score=0)
+        if all_log:
+            append_log(all_log, f"{now} ip={ip} score={score} cats={cats} hits={len(hits)}")
+
+        # ✅ Only log suspicious/malicious events
+        if score > 0:
+            append_log(events_log, f"{now} ip={ip} score={score} cats={cats} hits={len(hits)}")
 
         was_banned = state_is_banned(entry_before, now=now) if entry_before else False
         is_now_banned = state_is_banned(entry_after, now=now)
@@ -89,7 +101,7 @@ def main_loop():
     error_log = logs.get("error_log", "./state/error.log")
 
     ensure_chain()
-    rules = get_rules_once()  # ✅ loaded once for both modes
+    rules = get_rules_once()  # loaded once for both modes
     state = load_state()
 
     ingestion = cfg.get("ingestion", {}) or {}
@@ -121,7 +133,7 @@ def main_loop():
 
                 events = parse_lines(lines, source=log_source)
 
-                # Scan each log event using the same detector => works for HTTPS
+                # Scan each log event
                 results = []
                 for e in events:
                     results.append(
@@ -134,7 +146,7 @@ def main_loop():
                         )
                     )
 
-                # Bruteforce from logs (more accurate)
+                # Bruteforce from logs
                 bf_cfg = (ingestion.get("bruteforce") or {})
                 if bf_cfg.get("enabled", True):
                     endpoints = tuple(bf_cfg.get("endpoints") or [])
