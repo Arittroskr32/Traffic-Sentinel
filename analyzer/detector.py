@@ -3,7 +3,7 @@ import re
 import yaml
 from typing import Any, Dict, List, Optional, Set
 
-from analyzer.normalizer import normalize
+from analyzer.normalizer import build_target_map
 from analyzer.rules_loader import load_all_rules, Rule
 
 MAX_HITS_PER_REQUEST = 50
@@ -20,7 +20,6 @@ WIN_DATA = os.path.join(VENDOR_RULES_DIR, "windows-powershell-commands.data")
 _UNIX_CMDS: Optional[set] = None
 _WIN_CMDS: Optional[set] = None
 
-# ✅ cache compiled rules so we don't reload every scan
 _RULES_CACHE: Optional[List[Rule]] = None
 
 
@@ -42,7 +41,6 @@ def _scoring_mode() -> str:
 
 
 def get_rules_once() -> List[Rule]:
-    """Load rules one time and reuse."""
     global _RULES_CACHE
     if _RULES_CACHE is None:
         _RULES_CACHE = load_all_rules(DEFAULT_COMPILED, DEFAULT_CUSTOM)
@@ -70,6 +68,41 @@ def _load_command_words_once() -> None:
     _WIN_CMDS = load_data(WIN_DATA)
 
 
+def _expand_targets(rule_targets: List[str]) -> List[str]:
+    """
+    Expand rule targets automatically so you don't need to edit rule YAML.
+
+    - If rule targets 'headers', also scan headers_kv + cookies + cookies_params
+    - If rule targets 'uri', also scan path + query + query_params
+    - Always include 'combined' as a catch-all
+    """
+    if not rule_targets:
+        rule_targets = ["uri", "headers", "body"]
+
+    out = list(rule_targets)
+
+    if "headers" in out:
+        if "headers_kv" not in out:
+            out.append("headers_kv")
+        if "cookies" not in out:
+            out.append("cookies")
+        if "cookies_params" not in out:
+            out.append("cookies_params")
+
+    if "uri" in out:
+        if "path" not in out:
+            out.append("path")
+        if "query" not in out:
+            out.append("query")
+        if "query_params" not in out:
+            out.append("query_params")
+
+    if "combined" not in out:
+        out.append("combined")
+
+    return out
+
+
 def scan_request(
     ip: str,
     uri: str,
@@ -80,46 +113,31 @@ def scan_request(
     if rules is None:
         rules = get_rules_once()
 
-    mode = _scoring_mode()  # "per_category" or "per_request"
-
-    header_text = ""
-    if isinstance(headers, dict):
-        header_text = " ".join(str(v) for v in headers.values())
-    elif isinstance(headers, str):
-        header_text = headers
-
-    norm_uri = normalize(uri)["normalized"]
-    norm_body = normalize(body)["normalized"]
-    norm_headers = normalize(header_text)["normalized"]
-
-    target_map = {
-        "uri": norm_uri,
-        "body": norm_body,
-        "headers": norm_headers,
-    }
+    mode = _scoring_mode()
+    target_map = build_target_map(uri=uri, headers=headers, body=body)
 
     hits: List[Dict[str, Any]] = []
     seen_categories: Set[str] = set()
 
     hit_count = 0
     for rule in rules:
-        for target in rule.targets:
-            target_text = target_map.get(target, "")
-            if not target_text:
+        targets = _expand_targets(rule.targets)
+
+        for target in targets:
+            text = target_map.get(target, "")
+            if not text:
                 continue
 
             for pat in rule.patterns:
-                if pat.search(target_text):
+                if pat.search(text):
                     hits.append({
                         "category": rule.category,
                         "id": rule.id,
                         "target": target,
-                        "matched": pat.pattern,
-                        "snippet": target_text[:160],
+                        "matched": getattr(pat, "pattern", str(pat)),
+                        "snippet": text[:160],
                     })
-
                     seen_categories.add(rule.category)
-
                     hit_count += 1
                     if hit_count >= MAX_HITS_PER_REQUEST:
                         break
@@ -128,12 +146,12 @@ def scan_request(
         if hit_count >= MAX_HITS_PER_REQUEST:
             break
 
-    # CMDi heuristic (adds category "cmdi" if triggered)
+    # CMDi heuristic
     _load_command_words_once()
     unix_cmds = _UNIX_CMDS or set()
     win_cmds = _WIN_CMDS or set()
 
-    combined = f"{norm_uri} {norm_headers} {norm_body}"
+    combined = target_map.get("combined", "")
     separators = ["&&", "||", ";", "|", "$(", "`", "\n", "\r"]
     sep_found = any(sep in combined for sep in separators)
 
@@ -160,9 +178,8 @@ def scan_request(
         })
         seen_categories.add("cmdi")
 
-    # ✅ Final score computation (toggle)
     if mode == "per_request":
-        score_total = 1 if len(seen_categories) > 0 else 0
+        score_total = 1 if seen_categories else 0
     else:
         score_total = len(seen_categories)
 

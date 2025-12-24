@@ -207,6 +207,12 @@ python scripts/compile_rules.py
 docker-compose up -d
 ```
 
+## Create the JSONL file on host:
+```bash
+sudo touch /var/log/nginx/trafficsentinel.jsonl
+sudo chmod 644 /var/log/nginx/trafficsentinel.jsonl
+```
+
 ### Nginx Host Logs (Recommended)
 
 Mount:

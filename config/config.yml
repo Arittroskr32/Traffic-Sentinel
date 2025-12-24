@@ -6,37 +6,29 @@
 # Capture settings (PCAP mode)
 # -------------------------------
 capture:
-  interface: "eth0"                 # Network interface to capture
-  pcap_dir: "./pcap"                # Directory for PCAP files
-  slice_seconds: 60                 # Capture duration per slice (seconds)
-  tcpdump_path: "tcpdump"           # Path to tcpdump binary
-  tshark_path: "tshark"             # Path to tshark binary
-  bpf_filter: "tcp or udp"          # BPF filter
-  snaplen: 0                        # 0 = full packet (-s 0)
+  interface: "eth0"
+  pcap_dir: "./pcap"
+  slice_seconds: 60
+  tcpdump_path: "tcpdump"
+  tshark_path: "tshark"
+  bpf_filter: "tcp or udp"
+  snaplen: 0
 
 # -------------------------------
 # Ingestion mode (HTTPS support)
 # -------------------------------
 ingestion:
-  mode: "log"                       # "pcap" or "log"
-  log_source: "access"              # "access" or "jsonl"
+  # Use "log" mode for HTTPS-friendly ingestion
+  mode: "log"
 
-  # ✅ Default: Nginx host logs mounted to /hostlogs (read-only)
-  # Most common nginx access log:
-  log_path: "/hostlogs/access.log"
+  # For Option A: JSONL produced by your app/proxy logger
+  log_source: "jsonl"
 
-  # If your nginx file name differs, change log_path:
-  # - Host: /var/log/nginx/site-access.log
-  #   Container: /hostlogs/site-access.log
-  # log_path: "/hostlogs/site-access.log"
-
-  # If you want a rotated log (NOT recommended for live tailing):
-  # - Host: /var/log/nginx/access.log.1
-  #   Container: /hostlogs/access.log.1
-  # log_path: "/hostlogs/access.log.1"
-
-  # For rotated logs: better to ingest the current file (access.log).
-  # Offset file handles continuous reading. If file truncates, tailer resets safely.
+  # This file must exist on the HOST at:
+  #   /var/log/nginx/trafficsentinel.jsonl
+  # ...and is mounted into container via:
+  #   - /var/log/nginx:/hostlogs:ro
+  log_path: "/hostlogs/trafficsentinel.jsonl"
 
   # Stateful tail offset (prevents reprocessing)
   offset_file: "./state/log_offset.json"
@@ -44,7 +36,7 @@ ingestion:
   # Max lines read per loop
   batch_lines: 2000
 
-  # Bruteforce detection from logs (best when status codes exist)
+  # Bruteforce detection from logs (works well when status codes exist)
   bruteforce:
     enabled: true
     threshold_per_minute: 10
@@ -69,26 +61,28 @@ rules:
 # Reputation / penalty system
 # -------------------------------
 reputation:
-  ban_threshold: 7                  # Points to trigger ban
-  ban_seconds: 3600                 # Temporary ban duration (seconds)
-  ban_limit: 3                      # Permanent ban after N bans
-  decay_seconds: 3600               # Reset penalty after inactivity
+  ban_threshold: 7
+  ban_seconds: 3600
+  ban_limit: 3
+  decay_seconds: 3600
 
 # -------------------------------
 # Allowlist (never banned)
 # -------------------------------
+# IMPORTANT: only ONE allowlist key (no duplicates)
 allowlist:
-  - "127.0.0.1"
-  # - "YOUR_PUBLIC_IP"
-  # - "MONITORING_IP"
+  static:
+    - "127.0.0.1"
+  trusted_testers:
+    - "192.168.1.0/24"
 
 # -------------------------------
 # Firewall enforcement
 # -------------------------------
 enforcement:
-  mode: "iptables"                  # iptables only (for now)
-  chain: "INPUT"                    # Base chain
-  ts_chain: "TS_BLOCK"              # TrafficSentinel chain
+  mode: "iptables"
+  chain: "INPUT"
+  ts_chain: "TS_BLOCK"
 
 # -------------------------------
 # Logging
@@ -103,29 +97,20 @@ logging:
 # Scoring behavior
 # -------------------------------
 scoring:
-  mode: "per_request"               # per_request = max +1 per request
+  # per_request = max +1 per request (you are using this)
+  mode: "per_request"
 
 # -------------------------------
 # PCAP metadata detections (HTTPS-friendly)
+# (still usable if you switch ingestion.mode back to pcap)
 # -------------------------------
 pcap_metadata:
   enabled: true
 
   portscan:
-    threshold_unique_ports: 20      # unique dst ports from same src in one slice => port scan (+1)
+    threshold_unique_ports: 20
     score: 1
 
   synflood:
-    threshold_syn_packets: 200      # SYN packets from same src in one slice => SYN flood (+1)
+    threshold_syn_packets: 200
     score: 1
-
-allowlist:
-  # Never ban these (admins/monitoring)
-  static:
-    - "127.0.0.1"
-
-  # Trusted testers / developers (IPs or CIDR ranges)
-  trusted_testers:
-    - "192.168.1.0/24"
-    # - "203.0.113.10"
-    # - "198.51.100.0/24"
