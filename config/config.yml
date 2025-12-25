@@ -3,7 +3,7 @@
 # ===============================
 
 # -------------------------------
-# Capture settings (PCAP mode)
+# Capture settings (PCAP mode) - UNUSED when running log ingestion only
 # -------------------------------
 capture:
   interface: "eth0"
@@ -15,7 +15,18 @@ capture:
   snaplen: 0
 
 # -------------------------------
-# Ingestion mode (HTTPS support)
+# Logging paths
+# -------------------------------
+logging:
+  events_log: "./state/events.log"
+  actions_log: "./state/actions.log"
+  error_log: "./state/error.log"
+
+  # Optional (logs everything including score=0)
+  # all_requests_log: "./state/all_requests.log"
+
+# -------------------------------
+# Ingestion mode (LOG is recommended for HTTPS)
 # -------------------------------
 ingestion:
   mode: "log"          # "pcap" or "log"
@@ -33,13 +44,9 @@ ingestion:
       - "/login"
       - "/signin"
       - "/auth"
-      - "/api/auth"
-      - "/wp-login.php"
-      - "/admin"
-      - "/administrator"
 
 # -------------------------------
-# Detection rules
+# Detector / rules
 # -------------------------------
 rules:
   compiled_rules_path: "./config/rules_compiled.yml"
@@ -58,31 +65,13 @@ reputation:
 # Allowlist (never banned)
 # -------------------------------
 allowlist:
-  static:
+  enabled: true
+  ips:
     - "127.0.0.1"
-  trusted_testers:
-    - "192.168.1.0/24"
+    - "::1"
 
 # -------------------------------
-# Firewall enforcement
-# -------------------------------
-enforcement:
-  mode: "iptables"
-  chain: "INPUT"
-  ts_chain: "TS_BLOCK"
-
-# -------------------------------
-# Logging
-# -------------------------------
-logging:
-  events_log: "./state/events.log"            # ✅ only score>0 events
-  actions_log: "./state/actions.log"
-  error_log: "./state/error.log"
-  reputation_file: "./state/reputation.json"
-  all_requests_log: "./state/all_requests.log"  # ✅ optional: logs everything
-
-# -------------------------------
-# Scoring behavior
+# Scoring mode (per_request recommended)
 # -------------------------------
 scoring:
   mode: "per_request"
@@ -91,7 +80,7 @@ scoring:
 # PCAP metadata detections (optional)
 # -------------------------------
 pcap_metadata:
-  enabled: true
+  enabled: false   # PCAP mode disabled (log ingestion only)
   portscan:
     threshold_unique_ports: 20
     score: 1

@@ -2,9 +2,8 @@ FROM python:3.12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Log-ingestion mode only (no PCAP capture). We keep iptables so bans can be applied.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tcpdump \
-    tshark \
     iptables \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -16,6 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-RUN mkdir -p /app/state /app/pcap /app/logs
-
-CMD ["python", "main.py"]
+# Default: run the orchestrator in log-monitoring mode
+CMD ["python3", "main.py"]

@@ -4,15 +4,12 @@ services:
     container_name: trafficsentinel
     restart: unless-stopped
 
-    # Needed for tcpdump + iptables
+    # Needed for iptables bans on the host (with host networking / privileged)
     cap_add:
       - NET_ADMIN
-      - NET_RAW
 
-    # Best for sniffing traffic on the host interfaces
+    # Apply bans directly on the host namespace
     network_mode: host
-
-    # Often needed for iptables inside container (especially with host net)
     privileged: true
 
     environment:
@@ -22,8 +19,6 @@ services:
       # Project mounts
       - ./config:/app/config
       - ./state:/app/state
-      - ./pcap:/app/pcap
-      - ./vendor:/app/vendor
 
       # ---------------------------------------
       # Option A (Recommended): Nginx host logs

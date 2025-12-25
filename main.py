@@ -1,11 +1,8 @@
-import argparse
 import os
 import time
 import signal
 import yaml
 
-from agent.capture import capture_traffic
-from analyzer.analyze import analyze_pcap
 from analyzer.detector import scan_request, get_rules_once
 from enforcer.firewall import ban_ip, unban_ip, is_banned as fw_is_banned, ensure_chain
 from core.state import load_state, save_state, update_ip_state, is_banned as state_is_banned
@@ -30,23 +27,13 @@ def append_log(path: str, line: str):
         f.write(line.rstrip() + "\n")
 
 
-def capture_only():
-    pcap_file = capture_traffic()
-    print(f"Captured: {pcap_file}")
-
-
-def analyze_only(pcap_file: str):
-    results = analyze_pcap(pcap_file)
-    for result in results:
-        print(result)
-
-
 def evidence_categories(result: dict) -> str:
     cats = result.get("categories") or []
     return ",".join(cats)
 
 
 def enforce_state(state: dict, now: int):
+    """Make firewall match the current state file."""
     for ip, entry in state.items():
         banned_by_state = state_is_banned(entry, now=now)
         if banned_by_state:
@@ -57,7 +44,7 @@ def enforce_state(state: dict, now: int):
                 unban_ip(ip)
 
 
-def process_results(results, state, logs, now):
+def process_results(results, state, logs, now: int):
     """
     ✅ events.log: only suspicious (score > 0)
     ✅ all_requests_log (optional): logs everything (score can be 0)
@@ -73,7 +60,7 @@ def process_results(results, state, logs, now):
         hits = result.get("hits", [])
         cats = evidence_categories(result)
 
-        # NEW: Track UA-only suppression if detector provides it
+        # Track UA-only suppression if detector provides it
         ua_only = bool(result.get("ua_only_suppressed", False))
 
         if not ip:
@@ -89,7 +76,7 @@ def process_results(results, state, logs, now):
                 f"{now} ip={ip} score={score} cats={cats} hits={len(hits)} ua_only={int(ua_only)}",
             )
 
-        # ✅ Only log suspicious/malicious events
+        # Only log suspicious/malicious events
         if score > 0:
             append_log(
                 events_log,
@@ -113,12 +100,22 @@ def main_loop():
     logs = cfg.get("logging", {}) or {}
     error_log = logs.get("error_log", "./state/error.log")
 
+    # Ensure host firewall chain exists (iptables)
     ensure_chain()
-    rules = get_rules_once()  # loaded once for both modes
+
+    # Load detection rules once
+    rules = get_rules_once()
+
+    # Load reputation state
     state = load_state()
 
     ingestion = cfg.get("ingestion", {}) or {}
-    mode = str(ingestion.get("mode", "pcap")).strip().lower()
+    mode = str(ingestion.get("mode", "log")).strip().lower()
+
+    # This build runs LOG INGESTION ONLY. If config asks for pcap, we override safely.
+    if mode != "log":
+        append_log(error_log, f"{int(time.time())} config_forced mode_was={mode} mode_now=log reason=pcap_disabled")
+        mode = "log"
 
     running = True
 
@@ -133,91 +130,65 @@ def main_loop():
         now = int(time.time())
 
         try:
-            if mode == "log":
-                log_path = ingestion.get("log_path", "./logs/access.log")
-                offset_file = ingestion.get("offset_file", "./state/log_offset.json")
-                batch_lines = int(ingestion.get("batch_lines", 2000))
-                log_source = str(ingestion.get("log_source", "access")).strip().lower()
+            log_path = ingestion.get("log_path", "./logs/access.log")
+            offset_file = ingestion.get("offset_file", "./state/log_offset.json")
+            batch_lines = int(ingestion.get("batch_lines", 2000))
+            log_source = str(ingestion.get("log_source", "access")).strip().lower()
 
-                lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
-                if not lines:
-                    time.sleep(1)
-                    continue
+            lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
+            if not lines:
+                time.sleep(1)
+                continue
 
-                events = parse_lines(lines, source=log_source)
+            events = parse_lines(lines, source=log_source)
 
-                # Scan each log event
-                results = []
-                for e in events:
+            results = []
+            for e in events:
+                results.append(
+                    scan_request(
+                        ip=e["ip"],
+                        uri=e.get("uri", ""),
+                        headers=e.get("headers", {}),
+                        body=e.get("body", ""),
+                        rules=rules,
+                    )
+                )
+
+            # Bruteforce heuristic from logs (optional)
+            bf_cfg = (ingestion.get("bruteforce") or {})
+            if bf_cfg.get("enabled", True):
+                endpoints = tuple(bf_cfg.get("endpoints") or [])
+                threshold = int(bf_cfg.get("threshold_per_minute", 10))
+                fail_statuses = tuple(int(x) for x in (bf_cfg.get("fail_statuses") or [401, 403]))
+
+                bf = detect_bruteforce(
+                    events,
+                    endpoints=endpoints,
+                    threshold_per_minute=threshold,
+                    fail_statuses=fail_statuses,
+                )
+                for ip, score in bf.items():
                     results.append(
-                        scan_request(
-                            ip=e["ip"],
-                            uri=e.get("uri", ""),
-                            headers=e.get("headers", {}),
-                            body=e.get("body", ""),
-                            rules=rules,
-                        )
-                    )
-
-                # Bruteforce from logs
-                bf_cfg = (ingestion.get("bruteforce") or {})
-                if bf_cfg.get("enabled", True):
-                    endpoints = tuple(bf_cfg.get("endpoints") or [])
-                    threshold = int(bf_cfg.get("threshold_per_minute", 10))
-                    fail_statuses = tuple(int(x) for x in (bf_cfg.get("fail_statuses") or [401, 403]))
-
-                    bf = detect_bruteforce(
-                        events,
-                        endpoints=endpoints,
-                        threshold_per_minute=threshold,
-                        fail_statuses=fail_statuses,
-                    )
-                    for ip, score in bf.items():
-                        results.append({
+                        {
                             "ip": ip,
                             "score_total": score,
                             "categories": ["bruteforce"],
-                            "hits": [{
-                                "category": "bruteforce",
-                                "id": "bf-log-heuristic",
-                                "target": "uri",
-                                "matched": "endpoint+failrate",
-                                "snippet": f">={threshold}/min auth failures",
-                            }],
+                            "hits": [
+                                {
+                                    "category": "bruteforce",
+                                    "id": "bf-log-heuristic",
+                                    "target": "uri",
+                                    "matched": "endpoint+failrate",
+                                    "snippet": f">={threshold}/min auth failures",
+                                }
+                            ],
                             "scoring_mode": "heuristic",
-                        })
+                        }
+                    )
 
-                process_results(results, state, logs, now)
-                save_state(state)
-                enforce_state(state, now)
-
-            else:
-                # PCAP mode (plaintext HTTP only)
-                pcap_file = capture_traffic()
-                if not pcap_file:
-                    append_log(error_log, f"{now} capture_failed")
-                    time.sleep(1)
-                    continue
-
-                analyzed_ok = False
-                try:
-                    results = analyze_pcap(pcap_file)
-                    analyzed_ok = True
-
-                    process_results(results, state, logs, now)
-                    save_state(state)
-                    enforce_state(state, now)
-
-                finally:
-                    if analyzed_ok:
-                        try:
-                            if os.path.exists(pcap_file):
-                                os.remove(pcap_file)
-                        except Exception as e:
-                            append_log(
-                                error_log,
-                                f"{int(time.time())} pcap_delete_failed file={pcap_file} err={repr(e)}",
-                            )
+            process_results(results, state, logs, now)
+            save_state(state)
+            enforce_state(state, now)
 
         except Exception as e:
             append_log(error_log, f"{int(time.time())} loop_failed mode={mode} err={repr(e)}")
@@ -226,14 +197,4 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TrafficSentinel orchestrator")
-    parser.add_argument("--capture-only", action="store_true", help="Only capture one PCAP slice")
-    parser.add_argument("--analyze-only", type=str, help="Analyze a given PCAP file")
-    args = parser.parse_args()
-
-    if args.capture_only:
-        capture_only()
-    elif args.analyze_only:
-        analyze_only(args.analyze_only)
-    else:
-        main_loop()
+    main_loop()
