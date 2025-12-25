@@ -25,7 +25,7 @@ logging:
   # Optional (logs everything including score=0)
   # all_requests_log: "./state/all_requests.jsonl"
 
-
+# -------------------------------
 # -------------------------------
 # Enforcement behavior
 # -------------------------------
@@ -40,7 +40,6 @@ enforcement:
   chain: "INPUT"
   ts_chain: "TS_BLOCK"
 
-# -------------------------------
 # Ingestion mode (LOG is recommended for HTTPS)
 # -------------------------------
 ingestion:
@@ -115,3 +114,13 @@ pcap_metadata:
   synflood:
     threshold_syn_packets: 200
     score: 1
+
+# -------------------------------
+# Telegram alerts (optional)
+# -------------------------------
+telegram:
+  enabled: false
+  bot_token: "8085778744:AAGkGFpzupA86a4x98aNsPEmxjIjOUWtpUo"
+  chat_id: "1363442206"
+  cooldown_seconds: 60
+  include_evidence: true

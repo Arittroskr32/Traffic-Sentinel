@@ -7,6 +7,7 @@ from typing import Dict, Any
 from analyzer.detector import scan_request, get_rules_once
 from enforcer.firewall import ban_ip, unban_ip, is_banned as fw_is_banned, ensure_chain
 from core.state import load_state, save_state, update_ip_state, is_banned as state_is_banned, is_flagged
+from core.telegram_alert import send_telegram_message
 
 from ingestor.log_reader import tail_lines
 from ingestor.parsers import parse_lines
@@ -57,7 +58,38 @@ def enforce_state(state: dict, now: int, action: str):
                 unban_ip(ip)
 
 
-def process_results(results, state, logs, now: int, action: str):
+def _format_telegram_flag_message(ip: str, result: dict, now: int) -> str:
+    # Keep it short and readable on mobile
+    method = (result.get("method") or "").strip()
+    uri = (result.get("uri") or "").strip()
+    cats = evidence_categories(result) or "unknown"
+    score = int(result.get("score_total", 0))
+
+    hits = result.get("hits") or []
+    # Show up to 2 evidence lines (avoid spam)
+    evidence_lines = []
+    for h in hits[:2]:
+        cat = h.get("category", "")
+        target = h.get("target", "")
+        matched = str(h.get("matched", ""))[:80]
+        evidence_lines.append(f"- {cat} on {target}: {matched}")
+
+    msg = [
+        "🚩 TrafficSentinel FLAG",
+        f"IP: {ip}",
+        f"Score: {score}",
+        f"Categories: {cats}",
+    ]
+    if method or uri:
+        msg.append(f"Request: {method} {uri}".strip())
+    if evidence_lines:
+        msg.append("Evidence:")
+        msg.extend(evidence_lines)
+    msg.append(f"Time: {now}")
+    return "\n".join(msg)
+
+
+def process_results(results, state, logs, now: int, action: str, cfg: Dict[str, Any], alert_cache: Dict[str, int]):
     """
     ✅ events.log: only suspicious (score > 0)
     ✅ all_requests_log (optional): logs everything (score can be 0)
@@ -66,17 +98,26 @@ def process_results(results, state, logs, now: int, action: str):
       - action='ban'  -> logs ban/unban transitions
       - action='mark' -> logs flag/unflag transitions (review-only; no firewall bans)
       - action='off'  -> no actions are written (events still logged)
+
+    ✅ telegram:
+      - action='mark' -> sends message only when IP becomes flagged
     """
     events_log = logs.get("events_log", "./state/events.log")
     actions_log = logs.get("actions_log", "./state/actions.log")
     all_log = logs.get("all_requests_log")  # optional
+
+    tg = cfg.get("telegram", {}) or {}
+    tg_enabled = bool(tg.get("enabled", False))
+    tg_token = str(tg.get("bot_token", "") or "").strip()
+    tg_chat_id = str(tg.get("chat_id", "") or "").strip()
+    tg_cooldown = int(tg.get("cooldown_seconds", 60) or 60)
+    tg_include_evidence = bool(tg.get("include_evidence", True))
 
     for result in results:
         ip = result.get("ip", "")
         score = int(result.get("score_total", 0))
         cats = evidence_categories(result)
 
-        # Track UA-only suppression if detector provides it
         ua_only = bool(result.get("ua_only_suppressed", False))
 
         if not ip:
@@ -121,8 +162,22 @@ def process_results(results, state, logs, now: int, action: str):
                     actions_log,
                     f"{now} action=flag ip={ip} flagged_at={entry_after.get('flagged_at', 0)} reason=cats:{cats}",
                 )
+
+                # ✅ Telegram alert on new flag (with cooldown per IP)
+                if tg_enabled and tg_token and tg_chat_id:
+                    last = int(alert_cache.get(ip, 0))
+                    if now - last >= tg_cooldown:
+                        alert_cache[ip] = now
+                        if tg_include_evidence:
+                            text = _format_telegram_flag_message(ip, result, now)
+                        else:
+                            text = f"🚩 TrafficSentinel FLAG\nIP: {ip}\nCategories: {cats}\nScore: {score}\nTime: {now}"
+                        send_telegram_message(tg_token, tg_chat_id, text)
+
             elif was_flagged and not is_now_flagged:
                 append_log(actions_log, f"{now} action=unflag ip={ip} reason=cleared")
+
+        # action == "off": do nothing in actions.log
 
 
 def main_loop():
@@ -159,45 +214,54 @@ def main_loop():
 
     signal.signal(signal.SIGINT, sigint_handler)
 
+    # Telegram cooldown cache (in-memory)
+    alert_cache: Dict[str, int] = {}
+
     while running:
         now = int(time.time())
 
         try:
-            if mode == "log":
-                log_path = ingestion.get("log_path", "/var/log/nginx/access.log")
-                offset_file = ingestion.get("offset_file", "./state/log_offset.json")
-                batch_lines = int(ingestion.get("batch_lines", 2000))
+            log_path = ingestion.get("log_path", "/var/log/nginx/access.log")
+            offset_file = ingestion.get("offset_file", "./state/log_offset.json")
+            batch_lines = int(ingestion.get("batch_lines", 2000))
 
-                raw_lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
-                reqs = parse_lines(raw_lines)
+            raw_lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
+            reqs = parse_lines(raw_lines, source=str(ingestion.get("log_source", "jsonl")).strip().lower())
 
-                # Detect brute-force based on auth endpoints/statuses
-                bf_cfg = (ingestion.get("bruteforce", {}) or {})
-                bf_hits = detect_bruteforce(reqs, bf_cfg, now=now)
+            # Detect brute-force based on auth endpoints/statuses
+            bf_cfg = (ingestion.get("bruteforce", {}) or {})
+            bf_hits = detect_bruteforce(reqs, bf_cfg, now=now)
 
-                results = []
-                for req in reqs:
-                    result = scan_request(req, rules)
-                    if result:
-                        results.append(result)
+            results = []
+            for req in reqs:
+                ip = req.get("ip", "")
+                uri = req.get("uri", "")
+                headers = req.get("headers", {}) or {}
+                body = req.get("body", "") or ""
+                result = scan_request(ip=ip, uri=uri, headers=headers, body=body, rules=rules)
+                if result:
+                    # enrich for logging/telegram
+                    result["uri"] = uri
+                    result["method"] = req.get("method", "")
+                    result["ts"] = req.get("ts", "")
+                    results.append(result)
 
-                # Add bruteforce results as score-bearing events
-                for ip, bf_score in bf_hits.items():
-                    results.append(
-                        {
-                            "ip": ip,
-                            "score_total": int(bf_score),
-                            "categories": ["bruteforce"],
-                            "hits": ["bruteforce"],
-                            "ua_only_suppressed": False,
-                        }
-                    )
+            # Add bruteforce results as score-bearing events
+            for ip, bf_score in bf_hits.items():
+                results.append(
+                    {
+                        "ip": ip,
+                        "score_total": int(bf_score),
+                        "categories": ["bruteforce"],
+                        "hits": ["bruteforce"],
+                        "ua_only_suppressed": False,
+                        "uri": "",
+                        "method": "",
+                        "ts": "",
+                    }
+                )
 
-            else:
-                # Safety fallback (should never happen)
-                results = []
-
-            process_results(results, state, logs, now, action)
+            process_results(results, state, logs, now, action, cfg, alert_cache)
             save_state(state)
             enforce_state(state, now, action)
 
