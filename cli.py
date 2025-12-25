@@ -25,6 +25,9 @@ Typical usage (host install or inside container):
   python3 cli.py ban 203.0.113.10 --seconds 7200 --reason "manual"
   python3 cli.py unban 203.0.113.10
 
+  # 6b) Reset penalty for an IP (keep any existing ban_until/permanent values)
+  python3 cli.py penalty-clear 203.0.113.10
+
   # 6) Tail logs
   python3 cli.py tail events --lines 50
   python3 cli.py tail actions --lines 50
@@ -190,7 +193,11 @@ def cmd_run(_args):
     from main import main_loop
 
     print("Starting TrafficSentinel monitor (log ingestion)...")
-    main_loop()
+    try:
+        main_loop()
+    except KeyboardInterrupt:
+        # main.py already prints a graceful message; this is a final safety net
+        print("Stopped.")
 
 
 def cmd_top(args):
@@ -301,6 +308,26 @@ def cmd_unban(args):
         state[ip]["permanent"] = False
         save_state(state)
         print("Updated state: ban cleared for", ip)
+
+
+def cmd_penalty_clear(args):
+    """Reset an IP's penalty score in the state file.
+
+    This is useful when you (or a trusted tester) triggered rules during
+    development and you want to quickly remove accumulated penalty without
+    deleting the whole state.
+    """
+    ip = args.ip.strip()
+    state = load_state()
+
+    if ip not in state:
+        print("No record for IP in state:", ip)
+        return
+
+    before = int(state.get(ip, {}).get("penalty", 0) or 0)
+    state[ip]["penalty"] = 0
+    save_state(state)
+    print(f"Penalty cleared for {ip}: {before} -> 0")
 
 
 def cmd_tail(args):
@@ -436,6 +463,7 @@ Examples:
   python3 cli.py show 203.0.113.10
   python3 cli.py ban 203.0.113.10 --seconds 3600 --reason "manual"
   python3 cli.py unban 203.0.113.10
+  python3 cli.py penalty-clear 203.0.113.10
   python3 cli.py tail events --lines 50
   python3 cli.py test --ip 1.2.3.4 --uri "/?q=<script>alert(1)</script>"
 """
@@ -481,6 +509,14 @@ Examples:
     sp = sub.add_parser("unban", help="Manually unban an IP (firewall + state)")
     sp.add_argument("ip", help="IP to unban")
     sp.set_defaults(func=cmd_unban)
+
+    # penalty-clear
+    sp = sub.add_parser(
+        "penalty-clear",
+        help="Reset an IP's penalty score in state (does not unban/remove firewall rules)",
+    )
+    sp.add_argument("ip", help="IP whose penalty you want to reset")
+    sp.set_defaults(func=cmd_penalty_clear)
 
     # tail
     sp = sub.add_parser("tail", help="Tail a TrafficSentinel log file")
