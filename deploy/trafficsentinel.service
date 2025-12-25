@@ -1,17 +1,22 @@
 [Unit]
-Description=TrafficSentinel daemon
+Description=TrafficSentinel (run in 30s bursts, restart every 30s)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/TrafficSentinel
-ExecStart=/opt/TrafficSentinel/venv/bin/python /opt/TrafficSentinel/main.py
-Restart=always
-RestartSec=3
-User=root
-Group=root
+WorkingDirectory=/root/Traffic-Sentinel
+ExecStart=/usr/bin/python3 /root/Traffic-Sentinel/cli.py run
 
-NoNewPrivileges=true
+# Run 30 seconds, then systemd sends SIGTERM (your main.py exits gracefully)
+RuntimeMaxSec=30
+
+# Wait 30 seconds, then start again
+Restart=always
+RestartSec=30
+
+# Make logs visible with journalctl
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

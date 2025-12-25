@@ -230,8 +230,39 @@ def cmd_show(args):
 
     now = int(time.time())
     print(f"IP: {ip}")
+
+    # core fields
     for k in ["penalty", "last_seen", "ban_until", "ban_count", "permanent"]:
         print(f"  {k}: {e.get(k)}")
+
+    # NEW: show mark-mode fields
+    if "flagged" in e or "flagged_at" in e:
+        print(f"  flagged: {bool(e.get('flagged', False))}")
+        print(f"  flagged_at: {int(e.get('flagged_at', 0) or 0)}")
+        print(f"  flag_count: {int(e.get('flag_count', 0) or 0)}")
+
+    # NEW: show max penalty observed
+    if "max_penalty" in e:
+        print(f"  max_penalty: {int(e.get('max_penalty', 0) or 0)}")
+
+    # NEW: show recent reasons/hits
+    reasons = e.get("recent_reasons") or []
+    if isinstance(reasons, list) and reasons:
+        print("  recent_reasons (latest first):")
+        for r in reversed(reasons[-10:]):
+            if not isinstance(r, dict):
+                continue
+            ts = int(r.get("ts", 0) or 0)
+            cat = str(r.get("category", ""))
+            target = str(r.get("target", ""))
+            pat = str(r.get("pattern", ""))[:180]
+            method = str(r.get("method", "") or "")
+            uri = str(r.get("uri", "") or "")
+            req = (f"{method} {uri}").strip()
+
+            print(f"    - {cat} on {target}: {pat}")
+            if req:
+                print(f"      request: {req}  ts={ts}")
 
     print(f"State banned:     {state_is_banned(e, now=now)}")
     try:
@@ -241,7 +272,6 @@ def cmd_show(args):
         print(f"Firewall blocked: (could not check) {repr(ex)}")
 
     print(f"Allowlisted:      {is_allowlisted(ip)}")
-
 
 def cmd_clear(args):
     if not args.yes:

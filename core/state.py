@@ -2,7 +2,7 @@ import json
 import os
 import time
 import yaml
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from core.allowlist import is_allowlisted
 
@@ -16,11 +16,14 @@ def _load_config() -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _settings() -> Dict[str, int]:
+def _settings() -> Dict[str, Any]:
     cfg = _load_config()
     rep = cfg.get("reputation", {}) or {}
+    enf = cfg.get("enforcement", {}) or {}
+    action = str(enf.get("action", "ban")).strip().lower()
+
     return {
-        # Threshold used for BOTH ban and mark workflows
+        "action": action,
         "ban_threshold": int(rep.get("ban_threshold", 7)),
         "ban_seconds": int(rep.get("ban_seconds", 3600)),
         "ban_limit": int(rep.get("ban_limit", 3)),
@@ -28,90 +31,69 @@ def _settings() -> Dict[str, int]:
     }
 
 
-def _enforcement_action() -> str:
-    """Returns 'ban' (legacy default), 'mark', or 'off'."""
-    cfg = _load_config()
-    enf = cfg.get("enforcement", {}) or {}
-    action = str(enf.get("action", "ban")).strip().lower()
-    if action not in ("ban", "mark", "off"):
-        return "ban"
-    return action
-
-
-def load_state(path: str = STATE_PATH) -> Dict[str, Any]:
-    if not os.path.exists(path):
+def load_state() -> Dict[str, Any]:
+    if not os.path.exists(STATE_PATH):
+        return {}
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
         return {}
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
 
-    # Backward compatibility defaults
-    for _, entry in data.items():
-        entry.setdefault("penalty", 0)
-        entry.setdefault("last_seen", 0)
-        entry.setdefault("ban_until", 0)
-        entry.setdefault("ban_count", 0)
-        entry.setdefault("permanent", False)
-
-        # Mark/review workflow fields
-        entry.setdefault("flagged", False)
-        entry.setdefault("flagged_at", 0)
-        entry.setdefault("flag_count", 0)
-        entry.setdefault("max_penalty", 0)
-
-    return data
+def save_state(state: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    os.replace(tmp, STATE_PATH)
 
 
-def save_state(state: Dict[str, Any], path: str = STATE_PATH) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-    os.replace(tmp_path, path)
+def _trim_recent(items: List[Any], max_items: int = 30) -> List[Any]:
+    if not items:
+        return []
+    if len(items) <= max_items:
+        return items
+    return items[-max_items:]
 
 
-def update_ip_state(state: Dict[str, Any], ip: str, score: int, now: Optional[int] = None) -> Dict[str, Any]:
+def update_ip_state(
+    state: Dict[str, Any],
+    ip: str,
+    score: int,
+    now: Optional[int] = None,
+    *,
+    reasons: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
-    Apply score (already computed from detector), update decay, and then:
+    Apply score, update decay, and update ban/flag state.
 
-    - enforcement.action == 'ban': sets ban_until/permanent using reputation settings
-    - enforcement.action == 'mark': NEVER bans; only sets flagged=True when threshold is reached
-    - enforcement.action == 'off' : tracks penalty/last_seen only (no ban, no flag)
+    Also stores *why* the IP gained penalty via `recent_reasons` so `cli.py show <ip>` can display it.
 
-    Note: allowlisted IPs (including CIDRs / trusted_testers) are NEVER penalized, flagged, or banned.
+    reasons: list[dict] like:
+      {
+        "ts": 123,
+        "category": "xss",
+        "target": "body",
+        "pattern": "(?i)<script",
+        "method": "GET",
+        "uri": "/path",
+      }
+
+    Note: allowlisted IPs are NEVER penalized/flagged/banned.
     """
+    now = now or int(time.time())
+
+    # Allowlist bypass
+    if is_allowlisted(ip):
+        return state.get(ip, {})
+
     s = _settings()
+    action = s["action"]
     ban_threshold = s["ban_threshold"]
     ban_seconds = s["ban_seconds"]
     ban_limit = s["ban_limit"]
     decay_seconds = s["decay_seconds"]
-
-    action = _enforcement_action()
-    now = now or int(time.time())
-
-    # ✅ Allowlisted IPs: never penalize, never ban/flag
-    if is_allowlisted(ip):
-        entry = state.setdefault(
-            ip,
-            {
-                "penalty": 0,
-                "last_seen": 0,
-                "ban_until": 0,
-                "ban_count": 0,
-                "permanent": False,
-                "flagged": False,
-                "flagged_at": 0,
-                "flag_count": 0,
-                "max_penalty": 0,
-            },
-        )
-        entry["last_seen"] = now
-        entry["penalty"] = 0
-        entry["ban_until"] = 0
-        entry["permanent"] = False
-        entry["flagged"] = False
-        entry["flagged_at"] = 0
-        return entry
 
     entry = state.setdefault(
         ip,
@@ -125,8 +107,14 @@ def update_ip_state(state: Dict[str, Any], ip: str, score: int, now: Optional[in
             "flagged_at": 0,
             "flag_count": 0,
             "max_penalty": 0,
+            # New: store why penalty happened
+            "recent_reasons": [],
         },
     )
+
+    # Backward compatibility for old state files
+    if "recent_reasons" not in entry or not isinstance(entry.get("recent_reasons"), list):
+        entry["recent_reasons"] = []
 
     # Decay if inactive
     if entry["last_seen"] and (now - entry["last_seen"] >= decay_seconds):
@@ -142,6 +130,22 @@ def update_ip_state(state: Dict[str, Any], ip: str, score: int, now: Optional[in
     if entry.get("permanent", False):
         return entry
 
+    # Save reasons when score>0
+    if score > 0 and reasons:
+        for r in reasons[:10]:
+            if not isinstance(r, dict):
+                continue
+            rr = {
+                "ts": int(r.get("ts", now) or now),
+                "category": str(r.get("category", "")),
+                "target": str(r.get("target", "")),
+                "pattern": str(r.get("pattern", ""))[:300],
+                "method": str(r.get("method", ""))[:12],
+                "uri": str(r.get("uri", ""))[:300],
+            }
+            entry["recent_reasons"].append(rr)
+        entry["recent_reasons"] = _trim_recent(entry["recent_reasons"], max_items=40)
+
     # Add penalty
     if score > 0:
         entry["penalty"] += int(score)
@@ -151,25 +155,25 @@ def update_ip_state(state: Dict[str, Any], ip: str, score: int, now: Optional[in
     if action == "off":
         return entry
 
-    # --- Mark: flag for review (no firewall bans) ---
+    # --- Mark: never ban, only flag ---
     if action == "mark":
-        if entry["penalty"] >= ban_threshold and not entry.get("flagged", False):
-            entry["flagged"] = True
-            entry["flagged_at"] = now
-            entry["flag_count"] = int(entry.get("flag_count", 0)) + 1
-            entry["max_penalty"] = max(int(entry.get("max_penalty", 0)), int(entry["penalty"]))
+        if entry["penalty"] >= ban_threshold:
+            if not entry.get("flagged", False):
+                entry["flagged"] = True
+                entry["flagged_at"] = now
+                entry["flag_count"] = int(entry.get("flag_count", 0)) + 1
             entry["penalty"] = 0
         return entry
 
     # --- Ban: legacy behavior ---
     if entry["penalty"] >= ban_threshold:
         entry["ban_until"] = now + ban_seconds
-        entry["ban_count"] += 1
-        entry["penalty"] = 0  # reset after ban
+        entry["ban_count"] = int(entry.get("ban_count", 0)) + 1
+        entry["penalty"] = 0
 
         if entry["ban_count"] >= ban_limit:
             entry["permanent"] = True
-            entry["ban_until"] = 0  # permanent ban doesn't need expiry
+            entry["ban_until"] = 0
 
     return entry
 

@@ -70,9 +70,9 @@ rules:
 # Reputation / penalty system
 # -------------------------------
 reputation:
-  ban_threshold: 7
+  ban_threshold: 10
   ban_seconds: 3600
-  ban_limit: 3
+  ban_limit: 5
   decay_seconds: 3600
 
 # -------------------------------
@@ -124,3 +124,4 @@ telegram:
   chat_id: "1363442206"
   cooldown_seconds: 60
   include_evidence: true
+  penalty_alert_threshold: 10
