@@ -25,6 +25,21 @@ logging:
   # Optional (logs everything including score=0)
   # all_requests_log: "./state/all_requests.jsonl"
 
+
+# -------------------------------
+# Enforcement behavior
+# -------------------------------
+enforcement:
+  # ✅ 'mark' = review-only (NO firewall bans, only flags in state/actions.log)
+  # ✅ 'ban'  = legacy auto-ban behavior
+  # ✅ 'off'  = log-only (no ban, no flags)
+  action: "mark"
+
+  # Firewall backend settings (used only when action: "ban")
+  mode: "iptables"
+  chain: "INPUT"
+  ts_chain: "TS_BLOCK"
+
 # -------------------------------
 # Ingestion mode (LOG is recommended for HTTPS)
 # -------------------------------

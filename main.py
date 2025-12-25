@@ -2,10 +2,11 @@ import os
 import time
 import signal
 import yaml
+from typing import Dict, Any
 
 from analyzer.detector import scan_request, get_rules_once
 from enforcer.firewall import ban_ip, unban_ip, is_banned as fw_is_banned, ensure_chain
-from core.state import load_state, save_state, update_ip_state, is_banned as state_is_banned
+from core.state import load_state, save_state, update_ip_state, is_banned as state_is_banned, is_flagged
 
 from ingestor.log_reader import tail_lines
 from ingestor.parsers import parse_lines
@@ -16,7 +17,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.yml")
 
 
-def load_config():
+def load_config() -> Dict[str, Any]:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
@@ -32,8 +33,20 @@ def evidence_categories(result: dict) -> str:
     return ",".join(cats)
 
 
-def enforce_state(state: dict, now: int):
-    """Make firewall match the current state file."""
+def enforcement_action(cfg: Dict[str, Any]) -> str:
+    """'ban' (default/legacy), 'mark' (review-only), or 'off' (logging only)."""
+    enf = cfg.get("enforcement", {}) or {}
+    action = str(enf.get("action", "ban")).strip().lower()
+    if action not in ("ban", "mark", "off"):
+        return "ban"
+    return action
+
+
+def enforce_state(state: dict, now: int, action: str):
+    """Make firewall match the current state file (only in action='ban')."""
+    if action != "ban":
+        return
+
     for ip, entry in state.items():
         banned_by_state = state_is_banned(entry, now=now)
         if banned_by_state:
@@ -44,11 +57,15 @@ def enforce_state(state: dict, now: int):
                 unban_ip(ip)
 
 
-def process_results(results, state, logs, now: int):
+def process_results(results, state, logs, now: int, action: str):
     """
     ✅ events.log: only suspicious (score > 0)
     ✅ all_requests_log (optional): logs everything (score can be 0)
-    ✅ actions.log: ban/unban transitions
+
+    ✅ actions.log:
+      - action='ban'  -> logs ban/unban transitions
+      - action='mark' -> logs flag/unflag transitions (review-only; no firewall bans)
+      - action='off'  -> no actions are written (events still logged)
     """
     events_log = logs.get("events_log", "./state/events.log")
     actions_log = logs.get("actions_log", "./state/actions.log")
@@ -57,7 +74,6 @@ def process_results(results, state, logs, now: int):
     for result in results:
         ip = result.get("ip", "")
         score = int(result.get("score_total", 0))
-        hits = result.get("hits", [])
         cats = evidence_categories(result)
 
         # Track UA-only suppression if detector provides it
@@ -73,26 +89,40 @@ def process_results(results, state, logs, now: int):
         if all_log:
             append_log(
                 all_log,
-                f"{now} ip={ip} score={score} cats={cats} hits={len(hits)} ua_only={int(ua_only)}",
+                f"{now} ip={ip} score={score} cats={cats} hits={len(result.get('hits', []))} ua_only={int(ua_only)}",
             )
 
         # Only log suspicious/malicious events
         if score > 0:
             append_log(
                 events_log,
-                f"{now} ip={ip} score={score} cats={cats} hits={len(hits)} ua_only={int(ua_only)}",
+                f"{now} ip={ip} score={score} cats={cats} hits={len(result.get('hits', []))} ua_only={int(ua_only)}",
             )
 
-        was_banned = state_is_banned(entry_before, now=now) if entry_before else False
-        is_now_banned = state_is_banned(entry_after, now=now)
+        # State transitions -> actions.log
+        if action == "ban":
+            was_banned = state_is_banned(entry_before, now=now) if entry_before else False
+            is_now_banned = state_is_banned(entry_after, now=now)
 
-        if not was_banned and is_now_banned:
-            append_log(
-                actions_log,
-                f"{now} action=ban ip={ip} permanent={entry_after.get('permanent', False)} reason=cats:{cats}",
-            )
-        elif was_banned and not is_now_banned:
-            append_log(actions_log, f"{now} action=unban ip={ip} reason=expired")
+            if not was_banned and is_now_banned:
+                append_log(
+                    actions_log,
+                    f"{now} action=ban ip={ip} permanent={entry_after.get('permanent', False)} reason=cats:{cats}",
+                )
+            elif was_banned and not is_now_banned:
+                append_log(actions_log, f"{now} action=unban ip={ip} reason=expired")
+
+        elif action == "mark":
+            was_flagged = is_flagged(entry_before) if entry_before else False
+            is_now_flagged = is_flagged(entry_after)
+
+            if not was_flagged and is_now_flagged:
+                append_log(
+                    actions_log,
+                    f"{now} action=flag ip={ip} flagged_at={entry_after.get('flagged_at', 0)} reason=cats:{cats}",
+                )
+            elif was_flagged and not is_now_flagged:
+                append_log(actions_log, f"{now} action=unflag ip={ip} reason=cleared")
 
 
 def main_loop():
@@ -100,8 +130,11 @@ def main_loop():
     logs = cfg.get("logging", {}) or {}
     error_log = logs.get("error_log", "./state/error.log")
 
-    # Ensure host firewall chain exists (iptables)
-    ensure_chain()
+    action = enforcement_action(cfg)
+
+    # Only create firewall chain when we actually enforce bans
+    if action == "ban":
+        ensure_chain()
 
     # Load detection rules once
     rules = get_rules_once()
@@ -130,65 +163,43 @@ def main_loop():
         now = int(time.time())
 
         try:
-            log_path = ingestion.get("log_path", "./logs/access.log")
-            offset_file = ingestion.get("offset_file", "./state/log_offset.json")
-            batch_lines = int(ingestion.get("batch_lines", 2000))
-            log_source = str(ingestion.get("log_source", "access")).strip().lower()
+            if mode == "log":
+                log_path = ingestion.get("log_path", "/var/log/nginx/access.log")
+                offset_file = ingestion.get("offset_file", "./state/log_offset.json")
+                batch_lines = int(ingestion.get("batch_lines", 2000))
 
-            lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
-            if not lines:
-                time.sleep(1)
-                continue
+                raw_lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
+                reqs = parse_lines(raw_lines)
 
-            events = parse_lines(lines, source=log_source)
+                # Detect brute-force based on auth endpoints/statuses
+                bf_cfg = (ingestion.get("bruteforce", {}) or {})
+                bf_hits = detect_bruteforce(reqs, bf_cfg, now=now)
 
-            results = []
-            for e in events:
-                results.append(
-                    scan_request(
-                        ip=e["ip"],
-                        uri=e.get("uri", ""),
-                        headers=e.get("headers", {}),
-                        body=e.get("body", ""),
-                        rules=rules,
-                    )
-                )
+                results = []
+                for req in reqs:
+                    result = scan_request(req, rules)
+                    if result:
+                        results.append(result)
 
-            # Bruteforce heuristic from logs (optional)
-            bf_cfg = (ingestion.get("bruteforce") or {})
-            if bf_cfg.get("enabled", True):
-                endpoints = tuple(bf_cfg.get("endpoints") or [])
-                threshold = int(bf_cfg.get("threshold_per_minute", 10))
-                fail_statuses = tuple(int(x) for x in (bf_cfg.get("fail_statuses") or [401, 403]))
-
-                bf = detect_bruteforce(
-                    events,
-                    endpoints=endpoints,
-                    threshold_per_minute=threshold,
-                    fail_statuses=fail_statuses,
-                )
-                for ip, score in bf.items():
+                # Add bruteforce results as score-bearing events
+                for ip, bf_score in bf_hits.items():
                     results.append(
                         {
                             "ip": ip,
-                            "score_total": score,
+                            "score_total": int(bf_score),
                             "categories": ["bruteforce"],
-                            "hits": [
-                                {
-                                    "category": "bruteforce",
-                                    "id": "bf-log-heuristic",
-                                    "target": "uri",
-                                    "matched": "endpoint+failrate",
-                                    "snippet": f">={threshold}/min auth failures",
-                                }
-                            ],
-                            "scoring_mode": "heuristic",
+                            "hits": ["bruteforce"],
+                            "ua_only_suppressed": False,
                         }
                     )
 
-            process_results(results, state, logs, now)
+            else:
+                # Safety fallback (should never happen)
+                results = []
+
+            process_results(results, state, logs, now, action)
             save_state(state)
-            enforce_state(state, now)
+            enforce_state(state, now, action)
 
         except Exception as e:
             append_log(error_log, f"{int(time.time())} loop_failed mode={mode} err={repr(e)}")
