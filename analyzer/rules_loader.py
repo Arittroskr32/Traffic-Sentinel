@@ -1,201 +1,204 @@
 import os
 import re
 import yaml
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-# Prefer the "regex" module for PCRE-like compatibility (CRS patterns)
-try:
-    import regex as rx  # pip install regex
-except Exception:
-    rx = None
 
-# ---- Known bad CRS artifacts / overbroad patterns ----
-# These are patterns that match almost any normal string and create massive false positives.
-BAD_RULE_IDS = {
-    # Known offenders in some CRS dumps
-    "932205",
-    "932207",
-}
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DEFAULT_COMPILED = os.path.join(BASE_DIR, "config", "rules_compiled.yml")
+DEFAULT_CUSTOM = os.path.join(BASE_DIR, "config", "rules_custom.yml")
+CONFIG_YML = os.path.join(BASE_DIR, "config", "config.yml")
 
-BAD_PATTERNS_EXACT = {
-    "^[^#]+",
-    "#.*",
-}
 
-BAD_PATTERNS_SUBSTR = {
-    # This family contains tokens for HTTP verbs and ends up matching normal requests/bodies
-    "(?:GE|POS)T",
-    "(?:GET|POST|HEAD)",
+TARGET_MAP = {
+    "uri": "uri",
+    "path": "uri",
+    "query": "args",
+    "query_params": "args",
+    "headers": "headers",
+    "headers_kv": "headers",
+    "cookies": "cookies",
+    "cookies_params": "cookies",
+    "user_agent": "ua",
+    "ua": "ua",
+    "body": "body",
+    "combined": "combined",
 }
 
 
-def _compile(pat: str, is_regex: bool):
-    if not isinstance(pat, str) or not pat:
+def _read_yaml_abs(path: str) -> Any:
+    if not path:
         return None
-    if is_regex:
-        if rx is not None:
-            try:
-                return rx.compile(pat, rx.IGNORECASE)
-            except Exception:
-                pass
-        try:
-            return re.compile(pat, re.IGNORECASE)
-        except Exception:
-            return None
-    try:
-        return re.compile(re.escape(pat), re.IGNORECASE)
-    except Exception:
+    if not os.path.isabs(path):
+        path = os.path.join(BASE_DIR, path)
+    if not os.path.exists(path):
         return None
-
-
-def _is_too_broad_pattern(rule_id: Optional[str], pat: str, is_regex: bool) -> bool:
-    """Return True if a pattern is clearly too broad / unsafe for log-based detection."""
-    if not isinstance(pat, str) or not pat.strip():
-        return True
-
-    rid = str(rule_id) if rule_id is not None else ""
-    p = pat.strip()
-
-    if rid in BAD_RULE_IDS:
-        return True
-    if p in BAD_PATTERNS_EXACT:
-        return True
-    for sub in BAD_PATTERNS_SUBSTR:
-        if sub in p:
-            return True
-
-    # Only attempt broadness test for regex patterns
-    if not is_regex:
-        return False
-
-    c = _compile(p, is_regex=True)
-    if c is None:
-        return True
-
-    # If it matches many benign samples, it's too broad.
-    benign_samples = [
-        "/", "/friends", "/post/7", "/register", "/api/login",
-        "hello", "abc123",
-        "GET", "POST", "HEAD",
-        "GET / HTTP/1.1", "POST /register HTTP/1.1",
-    ]
-    hits = sum(1 for s in benign_samples if c.search(s))
-
-    # Allow patterns that include obvious attack operators/tokens
-    allow_tokens = [
-        ";", "&&", "||", "`", "$(", "../",
-        "<script", "union", "select", "sleep", "pg_sleep",
-        "wget", "curl", "cmd", "powershell",
-    ]
-    if any(tok in p for tok in allow_tokens):
-        return False
-
-    if hits >= 6:
-        return True
-
-    return False
-
-
-class Rule:
-    def __init__(
-        self,
-        category: str,
-        rule_id: Optional[str],
-        targets: List[str],
-        patterns: List[str],
-        is_regex: bool,
-    ):
-        self.category = category
-        self.id = rule_id
-        self.targets = targets or ["uri", "headers", "body"]
-
-        # Enforce your global rule: each match contributes score=1
-        self.score = 1
-
-        self.is_regex = is_regex
-        self.patterns = []  # compiled patterns
-
-        for pat in patterns:
-            if _is_too_broad_pattern(rule_id, pat, is_regex):
-                continue
-            compiled = _compile(pat, is_regex)
-            if compiled is not None:
-                self.patterns.append(compiled)
-
-
-def load_yaml_rules(path: str) -> List[Rule]:
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        return yaml.safe_load(f)
 
-    out: List[Rule] = []
-    bad_rules = 0
-    bad_patterns = 0
-    skipped_broad = 0
 
-    for rule in data.get("rules", []):
-        if "category" not in rule or "patterns" not in rule:
-            bad_rules += 1
+def _get_paths_from_config() -> Tuple[str, str]:
+    """
+    config/config.yml supports:
+      rules:
+        compiled_rules_path: "config/rules_compiled.yml"  (or "" to disable)
+        custom_rules_path: "config/rules_custom.yml"
+    """
+    doc = _read_yaml_abs(CONFIG_YML)
+    if not isinstance(doc, dict):
+        return ("", "")
+    rules = doc.get("rules") or {}
+    if not isinstance(rules, dict):
+        return ("", "")
+
+    compiled = str(rules.get("compiled_rules_path", "") or "")
+    custom = str(rules.get("custom_rules_path", "") or "")
+    return (compiled.strip(), custom.strip())
+
+
+def _compile_regex(pat: str) -> Optional[re.Pattern]:
+    try:
+        return re.compile(pat)
+    except re.error:
+        return None
+
+
+def _expand_custom_schema(doc: Any) -> List[Dict[str, Any]]:
+    """
+    Custom schema:
+      rules:
+        - id, category, regex, targets[], patterns[]
+    Expands to flat rules:
+      {id, category, target, pattern, score, _re}
+    """
+    if not isinstance(doc, dict):
+        return []
+    items = doc.get("rules")
+    if not isinstance(items, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for r in items:
+        if not isinstance(r, dict):
             continue
 
-        category = str(rule.get("category", "unknown"))
-        rule_id = rule.get("id")
-        targets = rule.get("targets") or ["uri", "headers", "body"]
-        patterns = rule.get("patterns") or []
-        is_regex = bool(rule.get("regex", False))
+        rid = str(r.get("id", "rule") or "rule").strip()
+        cat = str(r.get("category", "unknown") or "unknown").strip().lower()
+        is_regex = bool(r.get("regex", True))
 
-        # Count broad skips (for visibility)
-        if isinstance(patterns, list):
+        targets = r.get("targets") or []
+        patterns = r.get("patterns") or []
+        if not isinstance(targets, list) or not isinstance(patterns, list):
+            continue
+
+        for t in targets:
+            t0 = str(t or "").strip().lower()
+            mapped_target = TARGET_MAP.get(t0)
+            if not mapped_target:
+                continue
+
             for p in patterns:
-                if isinstance(p, str) and _is_too_broad_pattern(rule_id, p, is_regex):
-                    skipped_broad += 1
+                p0 = str(p or "").strip()
+                if not p0:
+                    continue
 
-        r = Rule(
-            category=category,
-            rule_id=str(rule_id) if rule_id is not None else None,
-            targets=targets,
-            patterns=patterns,
-            is_regex=is_regex,
-        )
+                pat = p0 if is_regex else re.escape(p0)
+                cre = _compile_regex(pat)
+                if not cre:
+                    continue
 
-        if not r.patterns:
-            bad_patterns += len(patterns)
-            continue
-
-        out.append(r)
-
-    if bad_rules or bad_patterns or skipped_broad:
-        print(f"[rules_loader] skipped invalid rules={bad_rules}, failed patterns≈{bad_patterns}, skipped_too_broad≈{skipped_broad}")
+                out.append(
+                    {
+                        "id": rid,
+                        "category": cat,
+                        "target": mapped_target,
+                        "pattern": pat,
+                        "score": 1,
+                        "_re": cre,
+                    }
+                )
 
     return out
 
 
-def load_all_rules(compiled_path: str, custom_path: str, enabled_categories: Optional[List[str]] = None) -> List[Rule]:
-    compiled = load_yaml_rules(compiled_path)
-    custom = load_yaml_rules(custom_path)
-    all_rules = compiled + custom
+def _normalize_flat_schema(doc: Any) -> List[Dict[str, Any]]:
+    """
+    Flat schema accepted:
+      - list of {id, category, target, pattern, score}
+      - {"rules":[...]}
+      - {category: [ ...rules... ]}
+    """
+    if not doc:
+        return []
 
-    if enabled_categories:
-        enabled = set(enabled_categories)
-        all_rules = [r for r in all_rules if r.category in enabled]
+    rules_list: List[Dict[str, Any]] = []
 
-    # summary
-    cat_count: Dict[str, int] = {}
-    total_patterns = 0
-    for r in all_rules:
-        cat_count[r.category] = cat_count.get(r.category, 0) + 1
-        total_patterns += len(r.patterns)
+    if isinstance(doc, list):
+        rules_list = [x for x in doc if isinstance(x, dict)]
+    elif isinstance(doc, dict):
+        if isinstance(doc.get("rules"), list):
+            rules_list = [x for x in doc["rules"] if isinstance(x, dict)]
+        else:
+            for k, v in doc.items():
+                if isinstance(v, list):
+                    for x in v:
+                        if isinstance(x, dict):
+                            rr = dict(x)
+                            rr.setdefault("category", k)
+                            rules_list.append(rr)
 
-    print("[rules_loader] Loaded rules per category:")
-    for k in sorted(cat_count.keys()):
-        print(f"  {k}: {cat_count[k]}")
-    print(f"[rules_loader] Total compiled patterns: {total_patterns}")
+    out: List[Dict[str, Any]] = []
+    for r in rules_list:
+        pat = str(r.get("pattern", "") or "").strip()
+        if not pat:
+            continue
+        cre = _compile_regex(pat)
+        if not cre:
+            continue
 
-    return all_rules
+        out.append(
+            {
+                "id": str(r.get("id", r.get("name", "rule")) or "rule").strip(),
+                "category": str(r.get("category", "unknown") or "unknown").strip().lower(),
+                "target": str(r.get("target", "uri") or "uri").strip(),
+                "pattern": pat,
+                "score": int(r.get("score", 1) or 1),
+                "_re": cre,
+            }
+        )
+
+    return out
 
 
-if __name__ == "__main__":
-    base = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    compiled_path = os.path.join(base, "config", "rules_compiled.yml")
-    custom_path = os.path.join(base, "config", "rules_custom.yml")
-    rules = load_all_rules(compiled_path, custom_path)
-    print(f"Total loaded rules: {len(rules)}")
+def load_rules(compiled_path: Optional[str] = None, custom_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    IMPORTANT behavior:
+      - compiled_path is None  => use config/default
+      - compiled_path == ""    => DISABLE compiled rules
+      - custom_path is None    => use config/default
+      - custom_path == ""      => DISABLE custom rules
+    """
+    cfg_compiled, cfg_custom = _get_paths_from_config()
+
+    # compiled
+    if compiled_path is None:
+        compiled_path = cfg_compiled if cfg_compiled != "" else DEFAULT_COMPILED
+    # if compiled_path == "" => disabled
+
+    # custom
+    if custom_path is None:
+        custom_path = cfg_custom if cfg_custom != "" else DEFAULT_CUSTOM
+    # if custom_path == "" => disabled
+
+    compiled_rules: List[Dict[str, Any]] = []
+    custom_rules: List[Dict[str, Any]] = []
+
+    if compiled_path != "":
+        compiled_doc = _read_yaml_abs(compiled_path)
+        compiled_rules = _normalize_flat_schema(compiled_doc)
+
+    if custom_path != "":
+        custom_doc = _read_yaml_abs(custom_path)
+        custom_rules = _expand_custom_schema(custom_doc)
+
+    return compiled_rules + custom_rules

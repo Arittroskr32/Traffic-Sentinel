@@ -1,200 +1,286 @@
-![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
-![Docker](https://img.shields.io/badge/docker-supported-blue.svg)
-![Security](https://img.shields.io/badge/security-defense-critical)
-![Status](https://img.shields.io/badge/status-active-success.svg)
+# Steup my server fully for this project:
 
-# TrafficSentinel
-
-TrafficSentinel is a **rule-based traffic detection and automated enforcement system** designed to detect web attacks, abuse, and automated threats in real time, assign penalties, and apply firewall-based bans.
-
-It is intentionally **simple, explainable, and deterministic**, focusing on practical security enforcement rather than opaque ML or anomaly-based models.
-
-TrafficSentinel operates in **two complementary modes**:
-
-- **PCAP Capture Mode** — network-level visibility (plaintext HTTP + metadata)
-- **Log Ingestion Mode (Recommended)** — full HTTPS-capable application-layer detection
-
----
-
-## Core Capabilities
-
-### What TrafficSentinel Can Detect
-
-#### Application-layer attacks (HTTP / HTTPS via logs)
-- **XSS (Cross-Site Scripting)**
-- **SQL Injection**
-- **SSTI (Server-Side Template Injection)**
-- **Command Injection / RCE**
-- **Local File Inclusion (LFI)**
-- **PHP-specific attacks**
-- **Suspicious payload patterns** (via OWASP CRS-derived rules)
-
-Detection works by matching normalized request data against compiled rule patterns.
-
-#### Abuse & Automation
-- **Bruteforce attacks**
-  - Per-IP, per-minute detection
-  - Auth endpoint hit-rate analysis
-  - Log mode: counts failed attempts (401/403) when available
-- **High-rate malicious request patterns**
-- **Repeated attack attempts across multiple requests**
-
-#### Network-level metadata (PCAP mode)
-- Connection-level observation (all ports)
-- HTTP payload inspection when traffic is unencrypted
-- Foundation for future scan / SYN / flood detection
+## setup docker && docker compose
+```
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y ca-certificates curl gnupg lsb-release unzip
+```
+then
+```
+sudo apt remove -y docker docker-engine docker.io containerd runc
+```
+then
+```
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+```
+then
+```
+echo \
+"deb [arch=$(dpkg --print-architecture) \
+signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu \
+$(lsb_release -cs) stable" | \
+sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+```
+then
+```
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io
+```
+then
+```
+sudo systemctl enable docker
+sudo systemctl start docker
+```
+then check docker && docker compose
+```
+docker --version
+docker compose version
+```
 
 ---
 
-## Operating Modes
+# Install Nginx (reverse proxy + logging)
+```
+sudo apt install -y nginx
+sudo systemctl enable nginx
+sudo systemctl start nginx
+```
+## Configure Nginx for Flask (PORT 80 FIX)
+Create a new file:
+```
+sudo nano /etc/nginx/conf.d/trafficsentinel_jsonlog.conf
+```
+Paste here this:
+```
+log_format trafficsentinel_json escape=json
+'{'
+  '"ts":"$time_iso8601",'
+  '"remote_addr":"$remote_addr",'
+  '"host":"$host",'
+  '"server_addr":"$server_addr",'
+  '"method":"$request_method",'
+  '"uri":"$uri",'
+  '"args":"$args",'
+  '"status":$status,'
+  '"bytes":$body_bytes_sent,'
+  '"ref":"$http_referer",'
+  '"ua":"$http_user_agent"'
+'}';
+```
 
-### 1) PCAP Mode (Network Capture)
+then also check this -> in `nano config/config.yml` here:
 
-- Captures live traffic using `tcpdump` in **60-second slices**
-- Parses packets using `tshark`
-- Extracts:
-  - Source IP
-  - HTTP URI
-  - Headers (User-Agent, Host, Cookie)
-  - Body (when available)
-- Suitable for:
-  - Plain HTTP traffic
-  - Local testing
-  - Network-level visibility
+Set ingestion like this:
+```bash
+ingestion:
+  log_source: "jsonl"
+  log_path: "/var/log/nginx/vulnbook_access.jsonl"
+  target_hosts: []          # optional: ["yourdomain.com"]
+  target_server_ips: []     # optional: ["YOUR_SERVER_IP"]
+```
 
-> Note: HTTPS payloads are encrypted and cannot be inspected in PCAP mode.
+then first remove this:
+```
+sudo nano /etc/nginx/sites-available/vulnbook
+```
+then in `sudo nano /etc/nginx/sites-available/vulnbook` :
+here paste this
+```
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 50m;
+
+    access_log /var/log/nginx/vulnbook_access.jsonl trafficsentinel_json;
+    error_log  /var/log/nginx/vulnbook_error.log;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+then check `config/config.yml` :
+```
+ingestion:
+  log_source: jsonl
+  log_path: /var/log/nginx/vulnbook_access.jsonl
+```
+
+then restart nginx :
+```
+sudo nginx -t 
+sudo systemctl reload nginx
+```
+
+---
+# Now in 2nd part
+
+
+
+# To check POST body part also
+## 1) Install nginx njs module
+```
+sudo apt update
+sudo apt install -y nginx-module-njs
+```
+Then confirm it exists:
+```
+ls /usr/lib/nginx/modules/ | grep njs
+```
+
+## ✅ 2) Create /etc/nginx/ts_body.js (NEW FILE)
+```
+function body(r) {
+  // r.requestText exists only if request body was read
+  // keep it small: max 2048 chars
+  var b = r.requestText || "";
+  if (b.length > 2048) b = b.slice(0, 2048);
+  return b;
+}
+
+export default { body };
+```
+## Replace your current JSONL logging section with this:
+then find:
+```
+ls -l /etc/nginx/sites-enabled/
+```
+## ✅ (recommended): paste this fully
+```
+sudo tee /etc/nginx/conf.d/trafficsentinel_body.conf >/dev/null <<'NGINX'
+# NJS script import for body extraction
+js_import ts from /etc/nginx/ts_body.js;
+
+# Only capture body for selected endpoints
+map $request_uri $ts_capture_body {
+    default 0;
+    ~^/post/[0-9]+$ 1;
+}
+
+# If capture enabled, expose body via js; else blank
+map $ts_capture_body $ts_body {
+    default "";
+    1       ${ts.body};
+}
+
+# JSONL log format (adds "body")
+log_format ts_json escape=json
+  '{"ts":"$time_iso8601",'
+  '"remote_addr":"$remote_addr",'
+  '"xff":"$http_x_forwarded_for",'
+  '"host":"$host",'
+  '"server_addr":"$server_addr",'
+  '"request":"$request",'
+  '"method":"$request_method",'
+  '"uri":"$uri",'
+  '"args":"$args",'
+  '"status":$status,'
+  '"bytes":$body_bytes_sent,'
+  '"ref":"$http_referer",'
+  '"ua":"$http_user_agent",'
+  '"body":"$ts_body"'
+  '}';
+NGINX
+```
+
+then inside my `sudo nano /etc/nginx/sites-available/vulnbook
+` file:
+make this file `access_log` to:
+```
+sudo nano /etc/nginx/sites-available/vulnbook
+access_log /var/log/nginx/vulnbook_access.jsonl ts_json;
+js_set $ts_body_var $ts_body;
+```
+
+# Touch variable so nginx reads request body for r.requestText reliably
+
+then at the last do:
+```
+sudo nginx -t
+sudo systemctl reload nginx
+```
 
 ---
 
-### 2) Log Ingestion Mode (Recommended for HTTPS)
+# Check Logs of the server:
+```bash
+sudo tail -n 15 /var/log/nginx/vulnbook_access.jsonl
+```
 
-- Continuously tails server/application logs
-- Supports:
-  - Common access logs
-  - JSONL structured logs
-- Extracts:
-  - Client IP
-  - URI (path + query)
-  - Headers (if logged)
-  - Request body (if logged)
-  - Response status (for accurate bruteforce detection)
-- Enables **full vulnerability detection on HTTPS traffic**
 
-This mode provides the **highest accuracy** and is production-recommended.
+# after all setup to make run.py automatically run:
+do this:
+```
+sudo nano /etc/systemd/system/trafficsentinel.service
+```
+here do this:
+```
+[Unit]
+Description=TrafficSentinel Log Monitor
+After=network.target docker.service nginx.service
+Wants=docker.service
 
----
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Traffic-Sentinel
 
-## Detection Engine
+ExecStart=/usr/bin/python3 /root/Traffic-Sentinel/cli.py run
+Restart=always
+RestartSec=3
 
-### Rules System
+# Logging
+StandardOutput=journal
+StandardError=journal
 
-- **CRS-derived rules** compiled from vendor OWASP CRS files
-- **Custom rules** supported
-- Rules are:
-  - Regex-based
-  - Categorized by vulnerability type
-  - Scored uniformly (1 point per request)
+# Hardening (safe defaults)
+NoNewPrivileges=true
+PrivateTmp=true
 
-Rules are **loaded once at startup** and reused for performance.
-
-### Scoring Model
-
-- **Per-request scoring**
-  - Each request can add **at most +1 penalty**
-  - Prevents score inflation from multiple matches in a single request
-- Multiple malicious requests increase penalty cumulatively
-
----
-
-## Reputation & Enforcement
-
-### Reputation State
-
-Stored in `state/reputation.json`, tracking per IP:
-- `penalty`
-- `last_seen`
-- `ban_until`
-- `ban_count`
-- `permanent`
-
-### Penalty Logic
-
-- Penalty decays after inactivity (`decay_seconds`)
-- Temporary ban when penalty ≥ threshold
-- Permanent ban after repeated temporary bans
-- Allowlisted IPs are never penalized
-
-### Firewall Enforcement
-
-- Uses **iptables**
-- Dedicated chain: `TS_BLOCK`
-- Automatically:
-  - Applies bans
-  - Removes expired bans
-  - Prevents duplicate firewall rules
+[Install]
+WantedBy=multi-user.target
+```
+then
+```
+sudo systemctl daemon-reload
+sudo systemctl enable trafficsentinel
+sudo systemctl start trafficsentinel
+```
+verify
+```
+sudo systemctl status trafficsentinel --no-pager -l
+```
 
 ---
 
-## Bruteforce Detection
+# lastly
+```
+sudo rm -f /etc/systemd/system/trafficsentinel.service
+sudo systemctl daemon-reload
+```
 
-### PCAP Mode
-- Counts requests to authentication endpoints per IP per minute
-- Threshold-based detection (+1 score)
-
-### Log Mode (More Accurate)
-- Counts authentication endpoint hits
-- Uses response status codes (401/403) when available
-- Detects credential-stuffing and password spraying
-
----
-
-## Logging
-
-### Logs Produced
-
-- `state/events.log`
-  - Every detection event
-  - IP, score, categories, hit count
-
-- `state/actions.log`
-  - Ban events (with reason categories)
-  - Unban events (with reason: expired)
-  - Permanent bans
-
-- `state/error.log`
-  - Capture, parse, or enforcement errors
-
-Logs are append-only and suitable for rotation.
-
----
-
-## Rules Maintenance
-
-- **Authoritative rule files**
-  - `config/rules_custom.yml` — your custom rules
-  - `config/rules_compiled.yml` — auto-generated (do not edit)
-- To update CRS-based rules:
-  1. Update vendor CRS `.conf` files
-  2. Run `scripts/compile_rules.py`
-- Builds are reproducible when vendor rules are versioned
-
----
-
-## Security Model & Limitations
-
-### What It Does Well
-- Detects real application-layer attacks
-- Enforces automated bans safely
-- Works without modifying application code (log mode excepted)
-- Lightweight, explainable, rule-based logic
-
-### Known Limitations
-- Cannot inspect encrypted HTTPS payloads without logs
-- Not a replacement for a full WAF
-- No behavioral ML or anomaly detection (by design)
-- No distributed coordination (single-host scope)
-
----
-
-## Project Structure
-
+```
+sudo systemctl disable trafficsentinel 2>/dev/null || true
+sudo systemctl stop trafficsentinel 2>/dev/null || true
+```
+then 
+```
+sudo crontab -l
+crontab -l
+```
+then
+```
+sudo rm -f /etc/nginx/conf.d/trafficsentinel_jsonlog.conf
+sudo nginx -t && sudo systemctl reload nginx
+```

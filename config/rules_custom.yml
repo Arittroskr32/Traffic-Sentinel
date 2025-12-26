@@ -1,8 +1,6 @@
 # ============================================================
 # TrafficSentinel - Custom Detection Rules
 # ============================================================
-# Loaded together with rules_compiled.yml
-#
 # REQUIRED STRUCTURE:
 #   rules:
 #     - id: string
@@ -26,15 +24,17 @@
 rules:
 
 # ============================================================
-# XSS (Cross-Site Scripting)
+# XSS
 # ============================================================
 - id: "XSS_SCRIPT_TAG"
   category: "xss"
   regex: true
-  targets: ["uri", "query_params", "body", "combined"]
+  targets: ["query_params", "body", "combined"]
   patterns:
     - "(?i)<\\s*script\\b[^>]*>"
     - "(?i)</\\s*script\\s*>"
+    # URL-encoded <script
+    - "(?i)%3c\\s*script\\b"
 
 - id: "XSS_EVENT_HANDLERS"
   category: "xss"
@@ -50,6 +50,8 @@ rules:
   patterns:
     - "(?i)javascript\\s*:"
     - "(?i)data\\s*:\\s*text\\s*/\\s*html"
+    # encoded "javascript:"
+    - "(?i)javascript%3a"
 
 - id: "XSS_COMMON_JS_FUNCS"
   category: "xss"
@@ -84,13 +86,16 @@ rules:
   targets: ["query_params", "body", "combined"]
   patterns:
     - "(?i)\\bunion\\b\\s*(?:all\\s+)?\\bselect\\b"
+    # encoded "union select"
+    - "(?i)union%20(?:all%20)?select"
 
 - id: "SQLI_COMMENT_TRUNCATION"
   category: "sqli"
   regex: true
   targets: ["query_params", "body", "combined"]
   patterns:
-    - "(?:--|#|/\\*)"
+    # tighter: require SQL-ish words near comment
+    - "(?i)\\b(select|union|where|and|or|sleep|benchmark)\\b[^\\n]{0,80}(?:--|#|/\\*)"
 
 - id: "SQLI_TIME_BASED"
   category: "sqli"
@@ -100,6 +105,8 @@ rules:
     - "(?i)\\bsleep\\s*\\("
     - "(?i)\\bbenchmark\\s*\\("
     - "(?i)\\bpg_sleep\\s*\\("
+    # encoded sleep(
+    - "(?i)sleep%28"
 
 - id: "SQLI_SCHEMA_ENUM"
   category: "sqli"
@@ -116,7 +123,7 @@ rules:
 - id: "LFI_TRAVERSAL"
   category: "lfi"
   regex: true
-  targets: ["uri", "query", "query_params", "combined"]
+  targets: ["uri", "query_params", "combined"]
   patterns:
     - "(?:\\.\\./|%2e%2e%2f|\\.\\.\\\\|%2e%2e%5c){1,8}"
 
@@ -130,6 +137,8 @@ rules:
     - "(?i)/proc/self/environ"
     - "(?i)boot\\.ini"
     - "(?i)windows\\\\win\\.ini"
+    # encoded /etc/passwd
+    - "(?i)%2fetc%2fpasswd"
 
 - id: "LFI_NULL_BYTE"
   category: "lfi"
@@ -148,7 +157,10 @@ rules:
   regex: true
   targets: ["query_params", "body", "combined"]
   patterns:
+    # raw chaining
     - "(?:;|&&|\\|\\||\\|)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
+    # url-encoded chaining: %3B ;  %26%26 &&  %7C |  %7C%7C ||
+    - "(?:%3b|%26%26|%7c%7c|%7c)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
 
 - id: "RCE_SUBSHELL_EXEC"
   category: "rce"
@@ -157,6 +169,8 @@ rules:
   patterns:
     - "\\$\\([^\\)]{1,120}\\)"
     - "`[^`]{1,120}`"
+    # encoded $(
+    - "%24%28[^\\)]{1,120}\\)"
 
 - id: "RCE_ENV_EXPANSION"
   category: "rce"
@@ -165,7 +179,7 @@ rules:
   patterns:
     - "\\$\\{(?:IFS|PATH|HOME|SHELL|PWD)\\}"
 
-- id: "RCE_PHP_EXEC"
+- id: "PHP_EXEC_FUNCS"
   category: "php"
   regex: true
   targets: ["query_params", "body", "combined"]
@@ -183,6 +197,9 @@ rules:
   patterns:
     - "(?i)https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
     - "(?i)https?://169\\.254\\.169\\.254"
+    # encoded http://169.254.169.254
+    - "(?i)https?%3a%2f%2f169\\.254\\.169\\.254"
+    - "(?i)https?%3a%2f%2flocalhost"
 
 - id: "SSRF_DANGEROUS_SCHEMES"
   category: "ssrf"
@@ -190,6 +207,7 @@ rules:
   targets: ["query_params", "body", "combined"]
   patterns:
     - "(?i)(?:file|gopher|dict|ftp)://"
+    - "(?i)(?:file|gopher|dict|ftp)%3a%2f%2f"
 
 
 # ============================================================
@@ -200,8 +218,10 @@ rules:
   regex: true
   targets: ["query_params", "body", "combined"]
   patterns:
-    - "\\{\\{[^\\}]{1,120}\\}\\}"
-    - "\\{\\%[^\\%]{1,120}\\%\\}"
+    - "\\{\\{[^\\}]{1,180}\\}\\}"
+    - "\\{\\%[^\\%]{1,180}\\%\\}"
+    # encoded {{ }}
+    - "%7b%7b[^%]{1,220}%7d%7d"
 
 - id: "SSTI_PYTHON_INTROSPECTION"
   category: "ssti"
@@ -226,6 +246,8 @@ rules:
     - "(?i)data://text/plain"
     - "(?i)phar://"
     - "(?i)zip://"
+    # encoded php://
+    - "(?i)php%3a%2f%2f"
 
 
 # ============================================================
@@ -236,8 +258,10 @@ rules:
   regex: true
   targets: ["body", "combined"]
   patterns:
-    - "(?i)<!DOCTYPE\\s+[^>]{1,200}>"
-    - "(?i)<!ENTITY\\s+[^>]{1,200}>"
+    - "(?i)<!DOCTYPE\\s+[^>]{1,240}>"
+    - "(?i)<!ENTITY\\s+[^>]{1,240}>"
+    # encoded <!DOCTYPE
+    - "(?i)%3c!doctype"
 
 
 # ============================================================
@@ -285,12 +309,12 @@ rules:
 # ============================================================
 # Brute-force (URI hints – complements log-based BF detection)
 # ============================================================
-- id: "BRUTEFORCE_LOGIN_PATHS"
-  category: "bruteforce"
-  regex: true
-  targets: ["path", "uri"]
-  patterns:
-    - "(?i)^/(login|signin|auth|session)"
-    - "(?i)^/admin"
-    - "(?i)^/user/login"
-    - "(?i)^/api/login"
+# - id: "BRUTEFORCE_LOGIN_PATHS"
+#   category: "bruteforce"
+#   regex: true
+#   targets: ["path", "uri"]
+#   patterns:
+#     - "(?i)^/(login|signin|auth|session)"
+#     - "(?i)^/admin"
+#     - "(?i)^/user/login"
+#     - "(?i)^/api/login"

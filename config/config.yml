@@ -51,7 +51,7 @@ ingestion:
   batch_lines: 300
 
   bruteforce:
-    enabled: true
+    enabled: false
     threshold_per_minute: 10
     fail_statuses: [401, 403]
     endpoints:
@@ -63,7 +63,7 @@ ingestion:
 # Detector / rules
 # -------------------------------
 rules:
-  compiled_rules_path: "./config/rules_compiled.yml"
+  compiled_rules_path: ""
   custom_rules_path: "./config/rules_custom.yml"
 
 # -------------------------------

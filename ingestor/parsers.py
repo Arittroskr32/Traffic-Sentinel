@@ -12,104 +12,66 @@ ACCESS_RE = re.compile(
     r'(?:"(?P<ref>[^"]*)"\s+"(?P<ua>[^"]*)")?'
 )
 
-# Safety limit for body logging/processing
-MAX_BODY = 8192
 
-
-def parse_access_line(line: str) -> Optional[Dict[str, Any]]:
-    """
-    Access logs typically do NOT include request body.
-    This parser is still used when log_source=access.
-    """
-    m = ACCESS_RE.match(line)
-    if not m:
-        return None
-    d = m.groupdict()
-    return {
-        "ip": d.get("ip", ""),
-        "uri": d.get("uri", "") or "",
-        "method": d.get("method", "") or "",
-        "status": int(d.get("status") or 0),
-        "headers": {
-            "user-agent": d.get("ua") or "",
-            "referer": d.get("ref") or "",
-        },
-        "body": "",
-        "ts": d.get("time", ""),
-        "raw": line,
-        "content_type": "",
-    }
-
-
-def _as_headers(obj: Any) -> Dict[str, Any]:
-    """
-    Normalize headers into a dict.
-    Accepts dict or list of pairs or raw string.
-    """
-    if obj is None:
+def _as_headers(h: Any) -> Dict[str, str]:
+    if not h:
         return {}
-    if isinstance(obj, dict):
-        return obj
-    if isinstance(obj, list):
-        # could be [["k","v"], ...] or [{"k":"..","v":".."}]
-        out: Dict[str, Any] = {}
-        for item in obj:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                out[str(item[0])] = item[1]
-            elif isinstance(item, dict):
-                # common patterns
-                k = item.get("key") or item.get("name") or item.get("k")
-                v = item.get("value") or item.get("v")
-                if k is not None:
-                    out[str(k)] = v
+    if isinstance(h, dict):
+        out: Dict[str, str] = {}
+        for k, v in h.items():
+            if k is None:
+                continue
+            kk = str(k)
+            if isinstance(v, (list, tuple)):
+                vv = ",".join(str(x) for x in v if x is not None)
+            else:
+                vv = "" if v is None else str(v)
+            out[kk] = vv
         return out
-    # fallback: store as one header blob
-    return {"headers": str(obj)}
+    return {}
 
 
-def _safe_body(body: Any) -> str:
-    """
-    Convert body to string, cap length, avoid crashes.
-    """
-    if body is None:
+def _safe_body(x: Any, limit: int = 2048) -> str:
+    if x is None:
         return ""
-    if isinstance(body, (dict, list)):
+    if isinstance(x, (dict, list)):
         try:
-            body = json.dumps(body, ensure_ascii=False)
+            s = json.dumps(x, ensure_ascii=False)
         except Exception:
-            body = str(body)
+            s = str(x)
     else:
-        body = str(body)
+        s = str(x)
+    if len(s) > limit:
+        s = s[:limit]
+    return s
 
-    if len(body) > MAX_BODY:
-        body = body[:MAX_BODY] + "...(truncated)"
-    return body
+
+def _combine_uri_args(uri: str, args: str) -> str:
+    uri = (uri or "").strip()
+    args = (args or "").strip()
+    if not uri:
+        return ""
+    if not args:
+        return uri
+    if "?" in uri:
+        return uri
+    return f"{uri}?{args}"
 
 
 def parse_jsonl_line(line: str) -> Optional[Dict[str, Any]]:
     """
-    JSONL event format (flexible). Examples of accepted keys:
+    JSONL event format (flexible). Supports your nginx JSONL keys:
+      ts, remote_addr, xff, host, server_addr, request, method, uri, args,
+      status, bytes, ref, ua, body
 
-    IP:
-      ip, client_ip, remote_addr, remoteAddress, src_ip
-    URI:
-      uri, path, url, full_path, request_uri, originalUrl
-    Method:
-      method
-    Status:
-      status, status_code
-    Headers:
-      headers
-    Body:
-      body, request_body
-    Timestamp:
-      ts, time, timestamp
-    Content-Type:
-      content_type, contentType
+    Returns:
+      {ip, uri, args, method, status, headers, body, ts}
     """
     try:
         obj = json.loads(line)
     except Exception:
+        return None
+    if not isinstance(obj, dict):
         return None
 
     ip = (
@@ -131,14 +93,46 @@ def parse_jsonl_line(line: str) -> Optional[Dict[str, Any]]:
         or ""
     )
 
+    # nginx JSONL often has args separately
+    args = obj.get("args") or obj.get("query") or obj.get("query_string") or ""
+    if args is None:
+        args = ""
+    args = str(args)
+
+    # fallback: parse from full request line: "GET /path?x=1 HTTP/1.1"
+    req = str(obj.get("request") or "")
+    if (not uri) and req:
+        parts = req.split()
+        if len(parts) >= 2:
+            uri = parts[1]
+
+    full_uri = _combine_uri_args(str(uri), args)
+
     method = obj.get("method") or ""
+    if not method and req:
+        parts = req.split()
+        if parts:
+            method = parts[0]
+
     status = obj.get("status") or obj.get("status_code") or 0
+
     headers = _as_headers(obj.get("headers") or obj.get("request_headers") or obj.get("hdrs") or {})
+
+    # Map nginx flat UA/XFF fields into headers so UA/header rules work
+    ua = obj.get("ua") or obj.get("user_agent") or ""
+    if ua and "User-Agent" not in headers:
+        headers["User-Agent"] = str(ua)
+
+    xff = obj.get("xff") or obj.get("x_forwarded_for") or obj.get("X-Forwarded-For") or ""
+    if xff and "X-Forwarded-For" not in headers:
+        headers["X-Forwarded-For"] = str(xff)
+
     body = _safe_body(obj.get("body") or obj.get("request_body") or obj.get("data") or "")
+
     ts = obj.get("ts") or obj.get("time") or obj.get("timestamp") or ""
     content_type = obj.get("content_type") or obj.get("contentType") or ""
 
-    if not ip or not uri:
+    if not ip or not full_uri:
         return None
 
     try:
@@ -148,26 +142,66 @@ def parse_jsonl_line(line: str) -> Optional[Dict[str, Any]]:
 
     return {
         "ip": str(ip),
-        "uri": str(uri),
+        "uri": full_uri,   # IMPORTANT: includes ?args
+        "args": args,
         "method": str(method),
         "status": status,
         "headers": headers,
         "body": body,
         "ts": str(ts),
-        "raw": line,
         "content_type": str(content_type),
     }
 
 
-def parse_lines(lines: List[str], source: str) -> List[Dict[str, Any]]:
+def parse_access_line(line: str) -> Optional[Dict[str, Any]]:
+    m = ACCESS_RE.match(line.strip())
+    if not m:
+        return None
+
+    ip = m.group("ip")
+    uri = m.group("uri")
+    method = m.group("method")
+    status = m.group("status") or "0"
+    ua = m.group("ua") or ""
+
+    try:
+        status_i = int(status)
+    except Exception:
+        status_i = 0
+
+    headers: Dict[str, str] = {}
+    if ua:
+        headers["User-Agent"] = ua
+
+    return {
+        "ip": ip,
+        "uri": uri,   # already includes query string in classic access logs
+        "args": "",
+        "method": method,
+        "status": status_i,
+        "headers": headers,
+        "body": "",
+        "ts": "",
+        "content_type": "",
+    }
+
+
+def parse_lines(lines: List[str], source: str = "access") -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
+    source = (source or "access").lower().strip()
+
     for line in lines:
-        if not line or not line.strip():
+        line = line.strip()
+        if not line:
             continue
+
+        ev: Optional[Dict[str, Any]] = None
         if source == "jsonl":
-            e = parse_jsonl_line(line)
+            ev = parse_jsonl_line(line)
         else:
-            e = parse_access_line(line)
-        if e:
-            out.append(e)
+            ev = parse_access_line(line)
+
+        if ev:
+            out.append(ev)
+
     return out
