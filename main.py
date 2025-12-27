@@ -91,7 +91,69 @@ def _hit_line(h: Dict[str, Any]) -> str:
     return f"- {cat} on {target}: {pat}"
 
 
-def _format_msg(title: str, ip: str, result: Dict[str, Any], now: int, extra: Optional[List[str]] = None) -> str:
+def _format_recent_events_for_ip(entry_before: Dict[str, Any], current_result: Dict[str, Any], now: int, *, max_events: int) -> List[str]:
+    """Return human-readable lines for the most recent events in the *current penalty streak*.
+
+    We build a window of events that contributed to the streak since the last penalty reset
+    (i.e., starting from the last event where penalty_before == 0), then append the current event.
+    """
+    out: List[str] = []
+
+    stored = entry_before.get("recent_events") or []
+    if not isinstance(stored, list):
+        stored = []
+
+    # Build streak since last reset (walk backwards until penalty_before == 0)
+    streak: List[Dict[str, Any]] = []
+    for ev in reversed(stored):
+        if not isinstance(ev, dict):
+            continue
+        streak.append(ev)
+        if int(ev.get("penalty_before", 0) or 0) == 0:
+            break
+    streak = list(reversed(streak))
+
+    # Append current event (derived from current_result)
+    hits = current_result.get("hits") or []
+    h0 = hits[0] if isinstance(hits, list) and hits and isinstance(hits[0], dict) else {}
+    cur = {
+        "ts": now,
+        "method": str(current_result.get("method", "") or "")[:12],
+        "uri": str(current_result.get("uri", "") or "")[:300],
+        "rule": {
+            "category": str(h0.get("category", "") or "")[:32],
+            "target": str(h0.get("target", "") or "")[:32],
+            "pattern": str(h0.get("pattern", "") or "")[:200],
+        },
+    }
+    streak = (streak + [cur])[-max_events:]
+
+    for ev in streak:
+        if not isinstance(ev, dict):
+            continue
+        r = ev.get("rule") or {}
+        cat = str(r.get("category", "") or "")
+        target = str(r.get("target", "") or "")
+        pat = str(r.get("pattern", "") or "")
+        method = str(ev.get("method", "") or "")
+        uri = str(ev.get("uri", "") or "")
+        ts = int(ev.get("ts", 0) or 0)
+        req = (f"{method} {uri}").strip()
+        line = f"- {cat} on {target}: {pat} | {req} | ts={ts}".strip()
+        out.append(line[:450])
+
+    return out
+
+
+def _format_msg(
+    title: str,
+    ip: str,
+    result: Dict[str, Any],
+    now: int,
+    extra: Optional[List[str]] = None,
+    *,
+    evidence_lines: Optional[List[str]] = None,
+) -> str:
     method = (result.get("method") or "").strip()
     uri = (result.get("uri") or "").strip()
     cats = evidence_categories(result) or "unknown"
@@ -103,14 +165,18 @@ def _format_msg(title: str, ip: str, result: Dict[str, Any], now: int, extra: Op
     if extra:
         msg.extend(extra)
 
-    hits = result.get("hits") or []
-    if hits:
+    if evidence_lines:
         msg.append("Evidence:")
-        for h in hits[:1]:
-            if isinstance(h, dict):
-                msg.append(_hit_line(h))
-            else:
-                msg.append(f"- {str(h)[:180]}")
+        msg.extend(evidence_lines)
+    else:
+        hits = result.get("hits") or []
+        if hits:
+            msg.append("Evidence:")
+            for h in hits[:1]:
+                if isinstance(h, dict):
+                    msg.append(_hit_line(h))
+                else:
+                    msg.append(f"- {str(h)[:180]}")
 
     msg.append(f"Time: {now}")
     return "\n".join(msg)
@@ -170,14 +236,9 @@ def _load_rules_from_cfg(cfg: Dict[str, Any]):
     compiled_path = str(rules_cfg.get("compiled_rules_path", "") or "").strip()
     custom_path = str(rules_cfg.get("custom_rules_path", "config/rules_custom.yml") or "").strip()
 
-    # load_rules handles empty compiled path (skips compiled)
     rules = load_rules(compiled_path=compiled_path, custom_path=custom_path)
 
-    # defensive: if someone forgot to set compiled_rules_path empty,
-    # but still wants ONLY custom rules, keep only IDs that exist in custom file
-    # (optional safeguard — can remove later)
     if compiled_path == "":
-        # rules already should be custom-only; nothing extra needed
         return rules
 
     return rules
@@ -214,7 +275,21 @@ def process_results(results, state, logs, now: int, action: str, cfg: Dict[str, 
                 if _cooldown_ok(alert_cache, f"markreset:{ip}", now, tgconf["cooldown"]):
                     alert_cache[f"markreset:{ip}"] = now
                     extra = [f"Penalty about to reset: {projected} (mark_threshold: {mark_threshold})"]
-                    _send_tg(tgconf, _format_msg("🚩 TrafficSentinel MARK THRESHOLD REACHED", ip, result, now, extra))
+                    # Include the full streak of events that led to this reset (up to mark_threshold events)
+                    streak_lines = _format_recent_events_for_ip(entry_before, result, now, max_events=mark_threshold)
+                    if not streak_lines:
+                        streak_lines = ["- <no events captured>"]
+                    _send_tg(
+                        tgconf,
+                        _format_msg(
+                            "🚩 TrafficSentinel MARK THRESHOLD REACHED",
+                            ip,
+                            result,
+                            now,
+                            extra,
+                            evidence_lines=streak_lines,
+                        ),
+                    )
 
         reasons = _reasons_from_result(result, now) if score > 0 else None
         entry_after = update_ip_state(state, ip, score, now=now, reasons=reasons)
@@ -259,7 +334,7 @@ def process_results(results, state, logs, now: int, action: str, cfg: Dict[str, 
                 append_log(actions_log, f"{now} action=flag ip={ip} flagged_at={entry_after.get('flagged_at', 0)} reason=cats:{cats}")
 
 
-def main_loop():
+def main_loop(*, poll_seconds: Optional[float] = None):
     cfg = load_config()
     logs = cfg.get("logging", {}) or {}
     error_log = logs.get("error_log", "./state/error.log")
@@ -269,9 +344,7 @@ def main_loop():
     if action == "ban":
         ensure_chain()
 
-    # ✅ IMPORTANT: load rules from config (custom-only if compiled path empty)
     rules = _load_rules_from_cfg(cfg)
-
     state = load_state()
 
     ingestion = cfg.get("ingestion", {}) or {}
@@ -294,6 +367,16 @@ def main_loop():
 
     alert_cache: Dict[str, int] = {}
 
+    ingestion = cfg.get("ingestion", {}) or {}
+    cfg_poll = ingestion.get("poll_seconds", None)
+    poll = poll_seconds if poll_seconds is not None else cfg_poll
+    try:
+        poll = float(poll) if poll is not None else 1.0
+    except Exception:
+        poll = 1.0
+    if poll <= 0:
+        poll = 1.0
+
     while running:
         now = int(time.time())
         try:
@@ -304,7 +387,7 @@ def main_loop():
 
             lines = tail_lines(log_path, offset_file, max_lines=batch_lines)
             if not lines:
-                time.sleep(1)
+                time.sleep(poll)
                 continue
 
             events = parse_lines(lines, source=log_source)
@@ -329,9 +412,6 @@ def main_loop():
                     res["uri"] = full_uri
                     results.append(res)
 
-            # ✅ Bruteforce disabled completely (no heuristics)
-            # (Also remove bruteforce rules from rules_custom.yml if you want.)
-
             if results and running:
                 process_results(results, state, logs, now, action, cfg, alert_cache)
                 save_state(state)
@@ -346,7 +426,7 @@ def main_loop():
 
         if not running:
             break
-        time.sleep(1)
+        time.sleep(poll)
 
     print("Stopped.")
 

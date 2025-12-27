@@ -1,36 +1,41 @@
+version: "3.9"
+
 services:
   trafficsentinel:
-    build: .
     container_name: trafficsentinel
-    restart: unless-stopped
+    image: trafficsentinel:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
 
-    # Needed for iptables bans on the host (with host networking / privileged)
-    cap_add:
-      - NET_ADMIN
-
-    # Apply bans directly on the host namespace
+    # REQUIRED for iptables + host log access
     network_mode: host
     privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    restart: unless-stopped
+
+    command: ["python3", "cli.py", "run", "--interval", "2"]
+
+    volumes:
+      # Persist state (reputation, offsets, logs)
+      - ./state:/app/state
+
+      # Mount nginx JSONL log from host
+      # MUST match ingestion.log_path in config.yml
+      - /var/log/nginx:/hostlogs:ro
+
+      # Optional: custom rules
+      - ./config:/app/config
 
     environment:
       - PYTHONUNBUFFERED=1
+      - TZ=UTC
 
-    volumes:
-      # Project mounts
-      - ./config:/app/config
-      - ./state:/app/state
-
-      # ---------------------------------------
-      # Option A (Recommended): Nginx host logs
-      # ---------------------------------------
-      # Mount the directory (recommended, not a single file):
-      - /var/log/nginx:/hostlogs:ro
-
-      # If your nginx logs are elsewhere, change host path:
-      # - /custom/path/to/nginx/logs:/hostlogs:ro
-
-      # ---------------------------------------
-      # Option B: Apache host logs
-      # ---------------------------------------
-      # Uncomment this and comment the nginx one above:
-      # - /var/log/apache2:/hostlogs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

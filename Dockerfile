@@ -15,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-# Default: run the orchestrator in log-monitoring mode
-CMD ["python3", "main.py"]
+# Default: run via CLI so flags like --interval can be used easily
+CMD ["python3", "cli.py", "run"]

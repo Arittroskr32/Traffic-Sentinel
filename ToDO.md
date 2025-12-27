@@ -84,6 +84,7 @@ ingestion:
 
 then first remove this:
 ```
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nano /etc/nginx/sites-available/vulnbook
 ```
 then in `sudo nano /etc/nginx/sites-available/vulnbook` :
@@ -227,26 +228,17 @@ sudo nano /etc/systemd/system/trafficsentinel.service
 here do this:
 ```
 [Unit]
-Description=TrafficSentinel Log Monitor
-After=network.target docker.service nginx.service
-Wants=docker.service
+Description=TrafficSentinel Monitor
+After=network.target
 
 [Service]
 Type=simple
-User=root
 WorkingDirectory=/root/Traffic-Sentinel
-
 ExecStart=/usr/bin/python3 /root/Traffic-Sentinel/cli.py run
 Restart=always
-RestartSec=3
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-
-# Hardening (safe defaults)
-NoNewPrivileges=true
-PrivateTmp=true
+RestartSec=2
+User=root
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
@@ -259,28 +251,8 @@ sudo systemctl start trafficsentinel
 ```
 verify
 ```
-sudo systemctl status trafficsentinel --no-pager -l
+sudo systemctl status trafficsentinel
 ```
 
 ---
 
-# lastly
-```
-sudo rm -f /etc/systemd/system/trafficsentinel.service
-sudo systemctl daemon-reload
-```
-
-```
-sudo systemctl disable trafficsentinel 2>/dev/null || true
-sudo systemctl stop trafficsentinel 2>/dev/null || true
-```
-then 
-```
-sudo crontab -l
-crontab -l
-```
-then
-```
-sudo rm -f /etc/nginx/conf.d/trafficsentinel_jsonlog.conf
-sudo nginx -t && sudo systemctl reload nginx
-```

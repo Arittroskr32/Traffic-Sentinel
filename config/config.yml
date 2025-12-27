@@ -45,10 +45,13 @@ enforcement:
 ingestion:
   mode: "log"          # "pcap" or "log"
   log_source: "jsonl"  # "access" or "jsonl"
-  log_path: "/hostlogs/trafficsentinel.jsonl"
+  log_path: "/var/log/nginx/vulnbook_access.jsonl"
 
   offset_file: "./state/log_offset.json"
   batch_lines: 300
+
+  # ✅ Added: run the loop every N seconds (used by cli.py run / main_loop)
+  poll_seconds: 2
 
   bruteforce:
     enabled: false

@@ -90,7 +90,6 @@ def cmd_show(args):
         if k in e:
             print(f"  {k}: {e.get(k)}")
 
-    # ✅ New preferred clean output
     events = e.get("recent_events") or []
     if isinstance(events, list) and events:
         print("  recent_events (latest first):")
@@ -112,7 +111,6 @@ def cmd_show(args):
                 pat = str(rule.get("pattern", "") or "")[:200]
                 print(f"      rule: {cat} on {target}: {pat}")
 
-    # ✅ Legacy compatibility (so you can still see something if old state exists)
     legacy = e.get("recent_reasons") or []
     if (not events) and isinstance(legacy, list) and legacy:
         print("  recent_reasons (legacy; upgrade state.py to migrate):")
@@ -138,9 +136,6 @@ def cmd_show(args):
     print(f"Allowlisted:      {is_allowlisted(ip)}")
 
 
-# (All other commands unchanged from your current cli.py)
-# ---- Keep the rest as-is ----
-
 def cmd_status(_args):
     cfg = _load_cfg()
     ingestion = (cfg.get("ingestion") or {})
@@ -151,6 +146,7 @@ def cmd_status(_args):
     log_path = ingestion.get("log_path")
     log_source = ingestion.get("log_source", "jsonl")
     offset_file = ingestion.get("offset_file", "./state/log_offset.json")
+    poll_seconds = ingestion.get("poll_seconds", 2)
 
     events_log = logging.get("events_log", "./state/events.log")
     actions_log = logging.get("actions_log", "./state/actions.log")
@@ -163,6 +159,7 @@ def cmd_status(_args):
     print(f"Log source:    {log_source}")
     print(f"Log path:      {log_path}")
     print(f"Offset file:   {offset_file}")
+    print(f"Poll seconds:  {poll_seconds}")
     print()
     print(f"events.log:    {events_log}")
     print(f"actions.log:   {actions_log}")
@@ -189,9 +186,13 @@ def cmd_status(_args):
 
 def cmd_run(_args):
     from main import main_loop
-    print("Starting TrafficSentinel monitor (log ingestion)...")
+    interval = getattr(_args, "interval", None)
+    if interval is None:
+        print("Starting TrafficSentinel monitor (log ingestion)...")
+    else:
+        print(f"Starting TrafficSentinel monitor (log ingestion) every {float(interval):g}s...")
     try:
-        main_loop()
+        main_loop(poll_seconds=interval)
     except KeyboardInterrupt:
         print("Stopped.")
 
@@ -341,11 +342,32 @@ def cmd_test(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="TrafficSentinel CLI")
+    examples = """Examples:
+  python3 ./cli.py status
+  python3 ./cli.py run
+  python3 ./cli.py run --interval 2
+  python3 ./cli.py top --n 20
+  python3 ./cli.py show 1.2.3.4
+  python3 ./cli.py tail events --lines 100
+  python3 ./cli.py test --ip 1.2.3.4 --uri /?q=%2fetc%2fpasswd
+"""
+
+    p = argparse.ArgumentParser(
+        description="TrafficSentinel CLI",
+        epilog=examples,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     sub = p.add_subparsers(dest="cmd")
 
     sp = sub.add_parser("status"); sp.set_defaults(func=cmd_status)
-    sp = sub.add_parser("run"); sp.set_defaults(func=cmd_run)
+    sp = sub.add_parser("run", help="Run log-monitor loop")
+    sp.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help="Polling interval in seconds (overrides config ingestion.poll_seconds)",
+    )
+    sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("top"); sp.add_argument("--n", type=int, default=15); sp.set_defaults(func=cmd_top)
     sp = sub.add_parser("show"); sp.add_argument("ip"); sp.set_defaults(func=cmd_show)
