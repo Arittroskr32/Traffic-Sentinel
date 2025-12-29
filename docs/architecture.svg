@@ -168,5 +168,5 @@
   <path class="arrow" d="M 1130 740 C 1200 690, 1300 660, 1400 660" marker-end="url(#mArrow)"/>
 
   <!-- footer note -->
-  <text class="small" x="70" y="875">Dark-theme friendly SVG • Colors: blue=ingestion, purple=runtime, green=scoring, yellow=enforcement • Repo layout: agent/, analyzer/, ingestor/, core/, enforcer/, rules/, config/, state/</text>
+  <text class="small" x="70" y="875">Repo layout: agent/, analyzer/, ingestor/, core/, enforcer/, rules/, config/, state/</text>
 </svg>
