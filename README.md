@@ -4,112 +4,356 @@
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 # TrafficSentinel
 
-TrafficSentinel is a **rule-based traffic detection and automated enforcement system** designed to detect web attacks, abuse, and automated threats in real time, assign penalties, and auto-ban IPs based on URI + headers + body firewall-based bans.
+TrafficSentinel is a **lightweight, log-based web traffic detection engine** designed to analyze structured access logs (JSONL) from web servers such as **Nginx**.
 
-It is intentionally **simple, explainable, and deterministic**, focusing on practical security enforcement rather than opaque ML models.
+It detects malicious and abusive HTTP traffic using **deterministic, rule-based logic**, assigns per-IP scores, and emits structured security events suitable for alerting, analysis, or downstream automation.
 
-TrafficSentinel operates in **two complementary modes**:
+TrafficSentinel focuses on **visibility, explainability, and low resource usage**, rather than opaque ML models or inline request blocking.
 
-- **PCAP Capture Mode** — network-level visibility (plaintext HTTP + metadata)
-- **Log Ingestion Mode (Recommended)** — full HTTPS-capable application-layer detection
-- **Auto-ban via iptables** (iptables TS_BLOCK)
-- **Detection inputs: URI, headers, body**
-
----
-
-## Core Capabilities
-
-### What TrafficSentinel Can Detect
-
-#### Application-Layer Attacks (HTTP / HTTPS via Logs)
-
-TrafficSentinel detects common web vulnerabilities by matching normalized request data against compiled security rules:
-
-- **XSS (Cross-Site Scripting)**
-- **SQL Injection**
-- **SSTI (Server-Side Template Injection)**
-- **Command Injection / RCE**
-- **Local File Inclusion (LFI)**
-- **PHP-specific attacks**
-- **Suspicious payload patterns**
-
-Detection is rule-based and primarily derived from **OWASP Core Rule Set (CRS)** patterns.
+> **Current status**
+>
+> - TrafficSentinel operates in **log ingestion mode only**
+> - PCAP capture code exists but is **not wired into the runtime**
+> - No automatic firewall enforcement is performed
 
 ---
 
-#### Abuse & Automation Detection
+## 1. Description
 
-- **Bruteforce attacks**
-  - Per-IP, per-minute detection
-  - Authentication endpoint hit-rate analysis
-  - Log mode: uses HTTP status codes (401 / 403)
-- **Repeated malicious request patterns**
-- **Credential stuffing / password spraying**
+TrafficSentinel continuously monitors HTTP request logs and identifies suspicious behavior such as:
 
----
+- Scanning and enumeration
+- Exploit probing
+- PHP-specific attack patterns
+- Webshell discovery attempts
+- Login bruteforce activity
 
-#### Network-Level Metadata (PCAP Mode)
+Each detection contributes to a **per-IP score**, allowing operators to identify persistent or high-risk actors over time.
 
-- Observes all TCP/UDP traffic
-- Detects:
-  - Port scanning (unique destination ports)
-  - SYN flood indicators
-- Inspects HTTP payloads **only when traffic is unencrypted**
+TrafficSentinel does **not** block traffic by itself.  
+It is designed to integrate cleanly with tools like **Fail2Ban, SIEMs, alerting systems, or custom automation**.
 
 ---
 
-## Operating Modes
+## 2. Core Capabilities
 
-### 1) PCAP Mode (Network Capture)
-
-- Captures live traffic using `tcpdump` in **60-second slices**
-- Parses PCAPs with `tshark`
-- Extracts:
-  - Source IP
-  - URI
-  - Headers (User-Agent, Host, Cookie)
-  - Request body (when available)
-- Suitable for:
-  - Plain HTTP traffic
-  - Local testing
-  - Network-level monitoring
-
-⚠️ HTTPS payloads are encrypted and not visible in PCAP mode.
+- 📄 JSONL log ingestion (Nginx / reverse proxies)
+- 🧠 Explainable rule-based detection
+- 🔍 Detection categories:
+  - Scan / enumeration
+  - PHP exploit probes
+  - Webshell paths
+  - Suspicious automated requests
+- 🔐 Log-based bruteforce detection
+- 📊 Per-IP scoring and categorization
+- 🧾 Append-only event logging
+- 📬 Optional Telegram notifications
+- 🐳 Docker-friendly
+- ⚡ Low CPU and memory footprint
 
 ---
 
-### 2) Log Ingestion Mode (Recommended for HTTPS)
+## 3. Operating Modes
 
-- Continuously tails server or application logs
-- Supports:
-  - Nginx access logs
-  - Apache access logs
-  - JSONL structured application logs
-- Extracts:
-  - Client IP
-  - URI (path + query)
-  - Response status code
-  - Headers (if logged)
-  - Request body (if logged)
+### Log Ingestion Mode (Primary & Only Active Mode)
 
-This mode enables **full vulnerability detection on HTTPS traffic** and is the **recommended production setup**.
+TrafficSentinel tails a newline-delimited JSON log file (`.jsonl`) and processes requests in near-real-time.
+
+This mode:
+- Works with HTTPS traffic
+- Supports full application-layer visibility
+- Is the **recommended and only supported production mode**
+
+### PCAP Mode (Disabled / Experimental)
+
+PCAP capture and analysis code exists in the repository but is **not connected to the runtime loop**.
+
+- No live packet capture occurs
+- No PCAPs are processed
+- Included for potential future development only
 
 ---
 
-## Detection Engine
+## 4. Detection Engine
 
 ### Rules System
 
-- **Compiled rules** generated from OWASP CRS vendor files
-- **Custom rules** supported
-- Rules are:
-  - Regex-based
-  - Categorized by vulnerability type
-  - Uniformly scored (**1 point per request**)
+- Regex-based detection rules
+- Rules are grouped by category (scan, php, exploit, etc.)
+- **Only one best rule hit per request**
+- Prevents score inflation from multiple matches
 
-Rules are **loaded once at startup** and reused for performance.
+Rules are lightweight and curated for **practical, high-signal attack patterns**.
+
+> TrafficSentinel does **not** currently use OWASP CRS compiled rules.
 
 ---
+
+## 5. Reputation & Enforcement
+
+### Reputation Model
+
+- Reputation is calculated **in memory**
+- Scores accumulate per IP
+- No long-term persistence or decay
+- No automatic banning or firewall changes
+
+### Enforcement
+
+TrafficSentinel performs **no direct enforcement**.
+
+Instead, it provides:
+- Structured events
+- Clear scoring
+- Reliable input for external tools
+
+This design keeps TrafficSentinel:
+- Safe to deploy
+- Predictable
+- Easy to integrate
+
+---
+
+## 6. Architecture Overview
+
+```bash
+        ┌────────────────────┐
+        │  Nginx / Proxy     │
+        │ (JSONL Access Log) │
+        └─────────┬──────────┘
+                  │
+                  ▼
+        ┌────────────────────┐
+        │  TrafficSentinel   │
+        └─────────┬──────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │        Log Tailer          │
+    │   (file tail / polling)   │
+    └─────────────┬─────────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │        JSON Parser         │
+    │   (normalize requests)    │
+    └─────────────┬─────────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │        Rule Matcher        │
+    │   (regex detection)       │
+    └─────────────┬─────────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │    Bruteforce Analyzer     │
+    │ (rate & status analysis)  │
+    └─────────────┬─────────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │      Score Aggregator      │
+    │     (per-IP scoring)      │
+    └─────────────┬─────────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │        Event Writer        │
+    │     (state/events.log)    │
+    └─────────────┬─────────────┘
+                  │
+    ┌─────────────▼─────────────┐
+    │   Alert Dispatcher        │
+    │     (Telegram optional)  │
+    └───────────────────────────┘
+ ```
+
+---
+
+## 7. Architecture Diagram (SVG)
+
+![Architecture](docs/architecture.svg)
+
+---
+
+## 8. Project Structure
+
+```
+Traffic-Sentinel/
+├── agent/ # PCAP capture code (inactive)
+├── analyzer/ # Rule matching & scoring
+├── ingestor/ # Log parsing & bruteforce detection
+├── rules/ # Detection rules
+├── config/ # Configuration files
+├── state/ # Runtime state & event logs
+├── cli.py # CLI entrypoint
+└── main.py # Main runtime loop
+```
+
+---
+
+## 9. Security Model & Limitations
+
+### What TrafficSentinel Does Well
+
+- Detects real application-layer attacks
+- Handles HTTPS correctly via logs
+- Produces explainable, auditable results
+- Minimal performance impact
+
+### Known Limitations
+
+- No automatic blocking
+- No HTTPS decryption in PCAP mode
+- No clustering or distributed state
+- No anomaly-based or ML detection
+- Single-host scope
+
+TrafficSentinel is **not a WAF replacement**.
+
+---
+
+## 10. Deployment
+
+### Docker (Recommended)
+
+```
+docker compose up -d
+or, docker-compose up -d
+```
+
+### Docker (Recommended)
+
+```yaml
+version: "3.8"
+
+services:
+  traffic-sentinel:
+    image: python:3.11-slim
+    container_name: traffic-sentinel
+    working_dir: /app
+    volumes:
+      - ./Traffic-Sentinel:/app
+      - /var/log/nginx:/hostlogs:ro
+    command: ["python3", "cli.py", "run", "--interval", "2"]
+    restart: unless-stopped
+```
+
+update config.yml:
+```
+log_path: "/hostlogs/trafficsentinel.jsonl"
+```
+
+### Authoritative Rule Files
+
+- `config/rules_custom.yml` — user-defined rules
+
+---
+
+## 11. Log Ingestion (Primary & Only Active Mode)
+
+### TrafficSentinel expects newline-delimited JSON logs.
+Minimal Required Fields
+```json
+{
+  "remote_addr": "1.2.3.4",
+  "request": "GET /wp-login.php HTTP/1.1",
+  "uri": "/wp-login.php",
+  "status": 404,
+  "ua": "Mozilla/5.0"
+}
+```
+Recommended Fields
+- xff
+- method
+- args
+- ref
+- body
+
+---
+
+## 12. Real Client IP (Cloudflare / Proxies)
+
+TrafficSentinel does not infer real client IPs automatically.
+Recommended: Nginx Real IP
+
+```bash
+real_ip_header CF-Connecting-IP;
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+real_ip_recursive on;
+```
+**Log $remote_addr after real IP processing.**
+
+---
+
+## 13. Nginx JSONL Logging (Example)
+Request Body Capture (NJS)
+`/etc/nginx/ts_body.js` :
+```
+function body(r) {
+  var b = r.requestText || "";
+  if (b.length > 2048) b = b.slice(0, 2048);
+  return b;
+}
+export default { body };
+```
+
+**Nginx Configuration**
+```bash
+js_import ts from /etc/nginx/ts_body.js;
+js_set $ts_body ts.body;
+
+log_format ts_json escape=json
+  '{"ts":"$time_iso8601",'
+  '"remote_addr":"$remote_addr",'
+  '"xff":"$http_x_forwarded_for",'
+  '"request":"$request",'
+  '"method":"$request_method",'
+  '"uri":"$uri",'
+  '"args":"$args",'
+  '"status":$status,'
+  '"ua":"$http_user_agent",'
+  '"body":"$ts_body"'
+  '}';
+
+access_log /var/log/nginx/trafficsentinel.jsonl ts_json;
+```
+
+---
+
+## 14. Bruteforce Detection (Log Mode)
+
+Bruteforce detection works by:
+- Monitoring authentication endpoints
+- Counting failed responses (401 / 403)
+- Grouping by IP per minute
+- Emitting events when thresholds are exceeded
+
+Example Configuration
+```
+ingestion:
+  bruteforce:
+    enabled: true
+    endpoints:
+      - /wp-login.php
+      - /login
+    threshold_per_minute: 10
+    fail_statuses: [401, 403]
+```
+---
+
+## 15. 🧾 Event Output
+
+Events are written to:
+```
+state/events.log
+```
+Format:
+```
+timestamp ip=<IP> score=<score> cats=<categories> hits=<count> ua_only=<0|1>
+```
+This output is suitable for:
+
+- Fail2Ban
+- SIEM ingestion
+- Alerting pipelines
+- Custom scripts
 
 ### Scoring Model
 
@@ -117,6 +361,18 @@ Rules are **loaded once at startup** and reused for performance.
   - Each request contributes **at most +1 penalty**
   - Prevents score inflation from multi-pattern matches
 - Penalties accumulate across multiple malicious requests
+
+---
+
+## Telegram Alerts
+Telegram alerts are optional and disabled by default.
+
+```
+telegram:
+  enabled: true
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
+```
 
 ---
 
@@ -152,20 +408,6 @@ Stored in `state/reputation.json`, tracking per IP:
   - Removes expired bans
   - Prevents duplicate firewall rules
 
----
-
-## Bruteforce Detection
-
-### PCAP Mode
-- Counts authentication endpoint requests per IP per minute
-
-### Log Mode (More Accurate)
-- Counts auth endpoint hits
-- Uses HTTP status codes (401 / 403)
-- Detects credential stuffing and password spraying
-
----
-
 ## Logging
 
 TrafficSentinel produces the following logs:
@@ -186,182 +428,68 @@ Logs are append-only and suitable for log rotation.
 
 ---
 
-## Rules Maintenance
-
-### Authoritative Rule Files
-
-- `config/rules_custom.yml` — user-defined rules
-- `config/rules_compiled.yml` — auto-generated (do not edit manually)
-
-### Updating CRS-Based Rules
-
-```bash
-python scripts/compile_rules.py
-```
-
----
-
-## Deployment
-
-### Runtime requirements (Linux host)
-
-TrafficSentinel needs elevated networking permissions to capture traffic and enforce bans:
-
-- `network_mode: host` (required for capture visibility + correct source IPs)
-- `cap_add: NET_ADMIN, NET_RAW` (required for `iptables` + packet capture)
-- `privileged: true` is used in this compose setup for simplicity (allows iptables/capture to work reliably)
-
-If you remove these, **PCAP capture and/or auto-banning will fail** (tcpdump/tshark won’t see traffic properly and iptables rules may not apply).
-
-
-### Docker (Recommended)
-
-```
-docker compose up -d
-or, docker-compose up -d
-```
-
-## Create the JSONL file on host:
+## Runtimr Setup
+### Create the JSONL file on host:
 ```bash
 sudo touch /var/log/nginx/trafficsentinel.jsonl
 sudo chmod 644 /var/log/nginx/trafficsentinel.jsonl
 ```
 
-### Nginx Host Logs (Recommended)
+### Systemd (Optional for automatic run):
 
-Mount:
-
-- /var/log/nginx:/hostlogs:ro
-
-Config:
-
-```yaml
-ingestion:
-  mode: log
-  log_path: /hostlogs/access.log
+do this:
 ```
-
-### Apache Host Logs (Alternative)
-
-Mount:
-
-- /var/log/apache2:/hostlogs:ro
-
-Config:
-
-```yaml
-log_path: /hostlogs/access.log
+sudo nano /etc/systemd/system/trafficsentinel.service
 ```
-**Alternative (basic):** You can ingest classic `access.log`, but detection will be mostly limited to path/query + limited metadata.
-
-
-### Systemd (Optional)
-
+here do this:
 ```
-sudo cp deploy/trafficsentinel.service /etc/systemd/system/
+[Unit]
+Description=TrafficSentinel Monitor
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Traffic-Sentinel
+ExecStart=/usr/bin/python3 /root/Traffic-Sentinel/cli.py run
+Restart=always
+RestartSec=2
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+then
+```
 sudo systemctl daemon-reload
 sudo systemctl enable trafficsentinel
 sudo systemctl start trafficsentinel
 ```
-## Architecture Overview
-
-TrafficSentinel follows a simple, modular pipeline:
+verify
 ```
-            ┌────────────┐
-            │  Traffic   │
-            │(HTTP/HTTPS)│
-            └─────┬──────┘
-                  │
-        ┌─────────▼─────────┐
-        │ Capture / Ingest  │
-        │  PCAP or Logs     │
-        └─────────┬─────────┘
-                  │
-        ┌─────────▼─────────┐
-        │ Normalization     │
-        │ + Detection Rules │
-        └─────────┬─────────┘
-                  │
-        ┌─────────▼─────────┐
-        │ Reputation Engine │
-        │ (penalty / decay) │
-        └─────────┬─────────┘
-                  │
-        ┌─────────▼─────────┐
-        │ Firewall Enforcer │
-        │   (iptables)      │
-        └─────────┬─────────┘
-
+sudo systemctl status trafficsentinel
 ```
-## Architecture Diagram
 
-![Architecture](docs/architecture.svg)
-
+---
 
 ## Admin CLI
 
 TrafficSentinel provides a built-in CLI for manual administration:
 
 ```
-python cli.py show-top
-python cli.py status <IP>
-python cli.py clear-penalty <IP>
-python cli.py unban <IP> [--force]
-python cli.py allowlist list|add|remove
+python3 cli.py status
+python3 cli.py top --n 20
+python3 cli.py run
+python3 cli.py show <IP>
+python3 cli.py penalty-clear <IP>
+python3 cli.py clear --yes
+python3 cli.py ban <IP> --permanent| --seconds 2400
+python3 cli.py unban <IP>
+python3 cli.py tail|actions|error --lines 100
+python3 cli.py allowlist list|add|remove
 ```
 
 Used for inspection, overrides, and maintenance.
 
-## Project Structure
+---
 
-```
-.
-├── Dockerfile
-├── docker-compose.yml
-├── main.py                 # Orchestrator
-├── cli.py                  # Admin CLI
-├── agent/                  # PCAP capture
-├── analyzer/               # Detection engine
-├── ingestor/               # Log ingestion & bruteforce
-├── enforcer/               # Firewall enforcement
-├── core/                   # Reputation state logic
-├── config/                 # Configuration & rules
-├── deploy/                 # systemd + logrotate
-├── scripts/                # Rule compilation
-├── vendor/                 # OWASP CRS rules
-├── state/                  # Runtime state & logs
-└── pcap/                   # Temporary PCAP files
-```
-
-## Security Model & Limitations
-
-### What TrafficSentinel Does Well
-
-- Detects real application-layer attacks
-- Handles HTTPS correctly via logs
-- Applies automated enforcement safely
-- Lightweight, explainable rule-based logic
-
-### Known Limitations
-
-- Cannot decrypt HTTPS traffic in PCAP mode
-- Not a full WAF replacement
-- No ML or anomaly detection (by design)
-- Single-host scope (no clustering)
-
-## Credits & Attribution
-
-### OWASP Core Rule Set (CRS)
-
-TrafficSentinel’s compiled detection rules are derived from the OWASP Core Rule Set.
-
-- Source repository:
-https://github.com/coreruleset/coreruleset/tree/main/rules
-
-- Copyright and license belong to the OWASP CRS Project
-
-- Vendor rule files under:
-```
-vendor/crs/rules/*
-```
-are included with proper attribution and are not authored by this project
