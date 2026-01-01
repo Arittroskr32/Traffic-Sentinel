@@ -155,12 +155,22 @@ rules:
 - id: "RCE_COMMAND_CHAINING"
   category: "rce"
   regex: true
-  targets: ["query_params", "body", "combined"]
+  targets: ["args", "body", "combined"]
   patterns:
-    # raw chaining
-    - "(?:;|&&|\\|\\||\\|)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
-    # url-encoded chaining: %3B ;  %26%26 &&  %7C |  %7C%7C ||
-    - "(?:%3b|%26%26|%7c%7c|%7c)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
+    - "(?i)(?:;|&&|\\|\\||\\|)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
+    - "(?i)(?:%3b|%26%26|%7c%7c|%7c)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
+
+- id: "RCE_STANDALONE_SHELL_CMD_BODY"
+  category: "rce"
+  regex: true
+  targets: ["body", "combined", "args"]
+  patterns:
+    # Standalone command on its own line inside multipart or plain bodies
+    - "(?im)(?:\\r?\\n\\r?\\n|^)(?:id|whoami|uname|pwd|ls)\\s*(?:\\r?\\n|$)"
+
+    # Command with a simple argument (kept short to reduce false positives)
+    - "(?im)(?:\\r?\\n\\r?\\n|^)(?:cat)\\s+[^\\r\\n]{1,80}(?:\\r?\\n|$)"
+
 
 - id: "RCE_SUBSHELL_EXEC"
   category: "rce"
@@ -216,21 +226,24 @@ rules:
 - id: "SSTI_JINJA"
   category: "ssti"
   regex: true
-  targets: ["query_params", "body", "combined"]
+  targets: ["args", "body", "combined"]
   patterns:
-    - "\\{\\{[^\\}]{1,180}\\}\\}"
-    - "\\{\\%[^\\%]{1,180}\\%\\}"
-    # encoded {{ }}
-    - "%7b%7b[^%]{1,220}%7d%7d"
+    # raw {{ ... }} and {% ... %}
+    - "\\{\\{[^\\}]{1,400}\\}\\}"
+    - "\\{\\%[^\\%]{1,400}\\%\\}"
+    - "(?i)%7b%7b.{1,800}?%7d%7d"
 
 - id: "SSTI_PYTHON_INTROSPECTION"
   category: "ssti"
   regex: true
-  targets: ["query_params", "body", "combined"]
+  targets: ["args", "body", "combined"]
   patterns:
     - "__class__"
     - "__mro__"
     - "__subclasses__"
+    - "__globals__"
+    - "__builtins__"
+    - "__import__"
 
 
 # ============================================================

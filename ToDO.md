@@ -219,6 +219,28 @@ sudo systemctl reload nginx
 sudo tail -n 15 /var/log/nginx/vulnbook_access.jsonl
 ```
 
+---
+
+# an important setup on which endpoint i want to check this like /post, /profile, /contact. 
+
+## for this 
+```
+sudo nano /etc/nginx/conf.d/trafficsentinel_body.conf
+```
+here:
+```json
+map $request_uri $ts_capture_body {
+    default 0;
+    ~^/post/[0-9]+$ 1;
+    ~^/profile/[0-9]+$ 1;
+}
+```
+then do:
+```
+sudo nginx -t && sudo systemctl reload nginx
+```
+---
+
 
 # after all setup to make run.py automatically run:
 do this:
