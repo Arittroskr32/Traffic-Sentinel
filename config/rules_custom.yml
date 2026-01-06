@@ -205,19 +205,22 @@ rules:
   regex: true
   targets: ["query_params", "body", "combined"]
   patterns:
-    - "(?i)https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+    # =========================================================
+    # Decoded URLs (http / https)
+    - "(?i)https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])"
     - "(?i)https?://169\\.254\\.169\\.254"
-    # encoded http://169.254.169.254
-    - "(?i)https?%3a%2f%2f169\\.254\\.169\\.254"
-    - "(?i)https?%3a%2f%2flocalhost"
 
-- id: "SSRF_DANGEROUS_SCHEMES"
-  category: "ssrf"
-  regex: true
-  targets: ["query_params", "body", "combined"]
-  patterns:
-    - "(?i)(?:file|gopher|dict|ftp)://"
-    - "(?i)(?:file|gopher|dict|ftp)%3a%2f%2f"
+    # =========================================================
+    # URL-encoded (http%3A// or https%3A//)
+    - "(?i)https?%3a%2f%2f(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+    - "(?i)https?%3a%2f%2f\\[::1\\]"
+    - "(?i)https?%3a%2f%2f169\\.254\\.169\\.254"
+
+    # =========================================================
+    # Double URL-encoded (http%253A%252F%252F...)
+    - "(?i)https?%253a%252f%252f(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+    - "(?i)https?%253a%252f%252f169\\.254\\.169\\.254"
+
 
 
 # ============================================================
