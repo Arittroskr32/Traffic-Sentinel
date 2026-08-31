@@ -25,6 +25,12 @@ rules:
 
 # ============================================================
 # XSS
+# NOTE on ordering: rules are evaluated first-match-wins across the
+# whole file, so the most specific/unambiguous patterns are kept
+# earliest and the broadest pattern in each category (e.g. the
+# event-handler rule below) is placed last, to reduce the chance
+# that a broad early rule "steals" a request that a later, more
+# specific rule (in this or another category) should have matched.
 # ============================================================
 - id: "XSS_SCRIPT_TAG"
   category: "xss"
@@ -35,13 +41,6 @@ rules:
     - "(?i)</\\s*script\\s*>"
     # URL-encoded <script
     - "(?i)%3c\\s*script\\b"
-
-- id: "XSS_EVENT_HANDLERS"
-  category: "xss"
-  regex: true
-  targets: ["query_params", "body", "combined"]
-  patterns:
-    - "(?i)\\bon\\w+\\s*=\\s*['\\\"]?[^'\\\">]{0,120}"
 
 - id: "XSS_JS_PROTOCOL"
   category: "xss"
@@ -59,6 +58,20 @@ rules:
   targets: ["query_params", "body"]
   patterns:
     - "(?i)\\b(?:alert|prompt|confirm)\\s*\\("
+    # legacy IE CSS expression() injection, e.g. style="width:expression(document.cookie=true)"
+    - "(?i)\\bexpression\\s*\\("
+
+- id: "XSS_LEGACY_ENCODING_BYPASS"
+  category: "xss"
+  regex: true
+  targets: ["query_params", "body", "combined"]
+  patterns:
+    # UTF-7 XSS bypass: declaring a UTF-7 charset lets "+ADw-"/"+AD4-" render
+    # as literal < / > even when a naive filter only blocks raw "<script>"
+    - "(?i)charset\\s*=\\s*['\\\"]?utf-7"
+    - "(?i)\\+ad[wc]-"
+    # legacy Netscape/Mozilla "JavaScript entity" execution: &{...};
+    - "&\\{[^}]{1,200}\\}\\s*;"
 
 - id: "XSS_IMG_SVG_PAYLOADS"
   category: "xss"
@@ -67,6 +80,16 @@ rules:
   patterns:
     - "(?i)<\\s*img\\b[^>]*\\bon\\w+\\s*="
     - "(?i)<\\s*svg\\b[^>]*\\bon\\w+\\s*="
+
+- id: "XSS_EVENT_HANDLERS"
+  category: "xss"
+  regex: true
+  targets: ["query_params", "body", "combined"]
+  patterns:
+    # explicit list of real HTML event-handler attributes only —
+    # a generic \bon\w+\s*= matched benign params like online=1,
+    # onward=true, once=yes, which caused most of the XSS false positives
+    - "(?i)\\b(?:onload|onerror|onclick|ondblclick|onmouseover|onmouseout|onmouseenter|onmouseleave|onmousedown|onmouseup|onfocus|onblur|onchange|oninput|onsubmit|onreset|onselect|onkeyup|onkeydown|onkeypress|onabort|onresize|onscroll|onwheel|oncontextmenu|ondrag|ondragstart|ondragend|ondrop|onpaste|oncopy|oncut|onanimationstart|onanimationend|ontransitionend|onpointerdown|onpointerup|ontoggle|onplay|onpause|onended|onbeforeunload|onunload|onhashchange|onpopstate)\\s*=\\s*['\\\"]?[^'\\\">]{0,120}"
 
 
 # ============================================================
@@ -78,7 +101,61 @@ rules:
   targets: ["query_params", "body", "combined"]
   patterns:
     - "(?i)(?:'|%27)\\s*or\\s*1\\s*=\\s*1"
-    - "(?i)\\bor\\s+\\d+\\s*=\\s*\\d+\\b"
+    # boolean tautologies across and|or|having|where|when, not just "or", with
+    # any comparison operator, between two numbers or two quoted strings.
+    # A bounded [\s(]{0,15} gap (rather than a strict \s+) is required because
+    # real sqlmap-style payloads wrap the operands in parens, e.g.
+    # "and (3020=3020)" or "and ((3078=3078" — a literal \s+ adjacency missed
+    # nearly all of these.
+    - "(?i)\\b(?:and|or|having|where|when)\\b[\\s(]{0,15}\\d+\\s*(?:>=|<=|<>|!=|=|>|<)\\s*\\d+\\b"
+    # digit compared against a subquery — the dominant boolean-blind idiom
+    # across backends (MySQL/MSSQL/Oracle/Postgres/DB2/Firebird), e.g.
+    # "and 6510=(select count(*) from ...)"
+    - "(?i)\\b(?:and|or|having|where|when)\\b[\\s(]{0,15}\\d+\\s*(?:>=|<=|<>|!=|=)\\s*\\(?\\s*select\\b"
+    # quoted-string tautology — trailing quote is optional because sqlmap
+    # intentionally leaves the string unterminated (relies on the rest of
+    # the legitimate query to close it), e.g. "and 'jjmt'='jjmt" with no
+    # closing quote in the captured value
+    - "(?i)\\b(?:and|or|having|where|when)\\b[\\s(]{0,15}'[^']{0,80}'\\s*(?:=|<>|!=)\\s*'[^']{0,80}"
+    - "(?i)\\b(?:and|or|having|where|when)\\b[\\s(]{0,15}\"[^\"]{0,80}\"\\s*(?:=|<>|!=)\\s*\"[^\"]{0,80}"
+    # LIKE comparison near a boolean keyword (lazy bounded gap to survive
+    # the same paren-wrapping as above)
+    - "(?i)\\b(?:and|or|having|where|when)\\b[^\\n]{0,25}?\\blike\\s+['\\\"]"
+    # ORDER BY column-count enumeration probe, e.g. "order by 1--", "order by 1#"
+    - "(?i)\\border\\s+by\\s+\\d+\\s*(?:--|#|%23|;)"
+
+- id: "SQLI_BLIND_FUNCS"
+  category: "sqli"
+  regex: true
+  targets: ["query_params", "body", "combined"]
+  patterns:
+    # error-based / blind SQLi function abuse missing from the other rules
+    - "(?i)\\bextractvalue\\s*\\("
+    - "(?i)\\bupdatexml\\s*\\("
+    - "(?i)\\bfloor\\s*\\(\\s*rand\\s*\\("
+    - "(?i)\\bexp\\s*\\(\\s*~"
+    - "(?i)\\bconvert\\s*\\("
+    - "(?i)\\bcast\\s*\\("
+    - "(?i)\\bprocedure\\s+analyse\\s*\\("
+    - "(?i)\\bregexp_substr(?:ing)?\\s*\\("
+    - "(?i)\\brlike\\b"
+    - "(?i)\\bxp_cmdshell\\b"
+    # additional blind/error-based functions seen in Oracle/Postgres/SQLite/MySQL payloads
+    - "(?i)\\belt\\s*\\("
+    - "(?i)\\bdbms_pipe\\.receive_message\\s*\\("
+    - "(?i)\\bdbms_utility\\.sqlid_to_sqlhash\\s*\\("
+    - "(?i)\\butl_inaddr\\.get_host_address\\s*\\("
+    - "(?i)\\bxmltype\\s*\\("
+    - "(?i)\\brandomblob\\s*\\("
+    - "(?i)\\bgenerate_series\\s*\\("
+
+- id: "SQLI_STACKED_QUERY"
+  category: "sqli"
+  regex: true
+  targets: ["query_params", "body", "combined"]
+  patterns:
+    # stacked/batched query injection: ";select ...", ";insert ...", etc.
+    - "(?i);\\s*(?:select|insert|update|delete|drop|exec)\\b"
 
 - id: "SQLI_UNION_SELECT"
   category: "sqli"
@@ -107,6 +184,8 @@ rules:
     - "(?i)\\bpg_sleep\\s*\\("
     # encoded sleep(
     - "(?i)sleep%28"
+    # MSSQL time-based delay
+    - "(?i)\\bwaitfor\\s+delay\\b"
 
 - id: "SQLI_SCHEMA_ENUM"
   category: "sqli"
@@ -115,6 +194,12 @@ rules:
   patterns:
     - "(?i)\\binformation_schema\\b"
     - "(?i)\\bmysql\\.user\\b"
+    # Firebird system tables, DB2/Sybase/Oracle system views used by
+    # sqlmap's cross-database "heavy query" boolean/time-blind technique
+    - "(?i)\\brdb\\$"
+    - "(?i)\\bsysibm\\.systables\\b"
+    - "(?i)\\ball_users\\b"
+    - "(?i)\\bsysusers\\b"
 
 
 # ============================================================
@@ -125,7 +210,21 @@ rules:
   regex: true
   targets: ["uri", "query_params", "combined"]
   patterns:
-    - "(?:\\.\\./|%2e%2e%2f|\\.\\.\\\\|%2e%2e%5c){1,8}"
+    # require 2+ traversal occurrences — a single "../" in an otherwise
+    # benign relative-path parameter was a plausible false positive.
+    # Allow optional extra slashes between repeats ("..//..//") since the
+    # doubled-slash WAF-bypass idiom breaks a strictly back-to-back match.
+    - "(?:(?:\\.\\./|%2e%2e%2f|\\.\\.\\\\|%2e%2e%5c)/*){2,8}"
+    # generalized N-dot bypass ("....//....//", a classic naive-filter
+    # evasion where stripping ".." once still leaves ".." behind)
+    - "(?:\\.{2,}[/\\\\]){2,}"
+    # hex-encoded-dot bypass (e.g. "0x2e0x2e" repeated in place of "..")
+    - "(?:0?x2e){3,}"
+    # hex-encoded-dot + hex-encoded-separator bypass, e.g.
+    # "0x2e0x2e0x5c" x N (".." + "\") or "...0x2f" ("../") — the run above
+    # requires 3+ *consecutive* dot-tokens, which this breaks by interleaving
+    # a separator token after every pair, so it needs its own alternation
+    - "(?:(?:0?x2e){2}(?:0?x5c|0?x2f)){2,}"
 
 - id: "LFI_SENSITIVE_FILES"
   category: "lfi"
@@ -139,14 +238,20 @@ rules:
     - "(?i)windows\\\\win\\.ini"
     # encoded /etc/passwd
     - "(?i)%2fetc%2fpasswd"
+    # IIS/Classic-ASP targets — absolute-path LFI probes for these often
+    # omit path separators entirely (e.g. "d:inetpubwwwrootglobal.asa")
+    - "(?i)\\binetpub\\b"
+    - "(?i)global\\.asa\\b"
 
 - id: "LFI_NULL_BYTE"
   category: "lfi"
   regex: true
   targets: ["query_params", "combined"]
   patterns:
-    - "%00"
-    - "\\x00"
+    # require the null byte to sit next to actual path/filename context
+    # (a slash, or a short extension) — a bare %00 anywhere in an unrelated
+    # field (e.g. a tax-id or price param) was a false-positive source
+    - "(?:\\.[a-zA-Z0-9]{1,5}|/)(?:%00|\\x00)"
 
 
 # ============================================================
@@ -157,8 +262,13 @@ rules:
   regex: true
   targets: ["args", "body", "combined"]
   patterns:
-    - "(?i)(?:;|&&|\\|\\||\\|)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
-    - "(?i)(?:%3b|%26%26|%7c%7c|%7c)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python|perl|nc|netcat)\\b"
+    # widened whitelist: original 11 commands missed ls, ping, echo, base64,
+    # rm/mv/cp/tar, openssl, interpreters (php/ruby/node), and Windows
+    # equivalents (cmd, powershell, dir, type, net user)
+    - "(?i)(?:;|&&|\\|\\||\\|)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python3?|perl|nc|netcat|ncat|telnet|ls|ping|echo|printf|base64|chmod|rm|mv|cp|tar|openssl|php|ruby|node|cmd(?:\\.exe)?|powershell(?:\\.exe)?|dir|type)\\b"
+    - "(?i)(?:%3b|%26%26|%7c%7c|%7c)\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|python3?|perl|nc|netcat|ncat|telnet|ls|ping|echo|printf|base64|chmod|rm|mv|cp|tar|openssl|php|ruby|node|cmd(?:\\.exe)?|powershell(?:\\.exe)?|dir|type)\\b"
+    # Windows "net user"/"net localgroup" recon (two-word commands don't fit the single-word list above)
+    - "(?i)(?:;|&&|\\|\\||\\||%3b|%26%26|%7c%7c|%7c)\\s*net\\s+(?:user|localgroup|view)\\b"
 
 - id: "RCE_STANDALONE_SHELL_CMD_BODY"
   category: "rce"
@@ -181,6 +291,20 @@ rules:
     - "`[^`]{1,120}`"
     # encoded $(
     - "%24%28[^\\)]{1,120}\\)"
+    # newline-based injection (%0a) followed by a shell command
+    - "(?i)%0a\\s*(?:id|whoami|uname|cat|curl|wget|bash|sh|ls|ping|echo)\\b"
+    # pipe-to-shell idiom: "... | bash", "... | sh"
+    - "(?i)\\|\\s*(?:bash|sh|zsh|ksh|python3?|perl|php|ruby|node)\\b"
+    # download-and-execute idiom: "curl ... | sh", "wget ... | bash"
+    - "(?i)\\b(?:curl|wget)\\b[^\\n|]{1,160}\\|\\s*(?:bash|sh|zsh|python3?|perl)\\b"
+
+- id: "RCE_SSI_INJECTION"
+  category: "rce"
+  regex: true
+  targets: ["query_params", "body", "combined"]
+  patterns:
+    # Server-Side Include directive injection, e.g. <!--#EXEC cmd="dir "-->
+    - "(?i)<!--\\s*#\\s*(?:exec|include|echo|config|fsize|flastmod|printenv)\\b"
 
 - id: "RCE_ENV_EXPANSION"
   category: "rce"
@@ -188,6 +312,12 @@ rules:
   targets: ["query_params", "body", "combined"]
   patterns:
     - "\\$\\{(?:IFS|PATH|HOME|SHELL|PWD)\\}"
+    # unbraced form: $IFS, $PATH, etc.
+    - "(?i)\\$(?:IFS|PATH|HOME|SHELL|PWD)\\b"
+    # $IFS$ WAF-bypass idiom (e.g. $IFS$9, $IFS$1)
+    - "\\$IFS\\$\\d*"
+    # URL-encoded $IFS$
+    - "(?i)%24ifs%24\\d*"
 
 - id: "PHP_EXEC_FUNCS"
   category: "php"
@@ -204,22 +334,35 @@ rules:
   category: "ssrf"
   regex: true
   targets: ["query_params", "body", "combined"]
+  # NOTE: this matches on substring, so a benign parameter that legitimately
+  # contains a literal http://127.0.0.1 (e.g. a "test connection" field)
+  # will always false-positive. Accepted limitation — not regex-fixable
+  # without allow-listing by endpoint.
   patterns:
     # =========================================================
-    # Decoded URLs (http / https)
-    - "(?i)https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])"
-    - "(?i)https?://169\\.254\\.169\\.254"
+    # Decoded URLs (http / https / gopher / dict / ftp / ldap — gopher in
+    # particular is a common SSRF-to-other-protocol smuggling technique
+    # and was missing entirely, e.g. gopher://127.0.0.1:9200/_GET%20/)
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)://169\\.254\\.169\\.254"
 
     # =========================================================
     # URL-encoded (http%3A// or https%3A//)
-    - "(?i)https?%3a%2f%2f(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
-    - "(?i)https?%3a%2f%2f\\[::1\\]"
-    - "(?i)https?%3a%2f%2f169\\.254\\.169\\.254"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)%3a%2f%2f(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)%3a%2f%2f\\[::1\\]"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)%3a%2f%2f169\\.254\\.169\\.254"
 
     # =========================================================
     # Double URL-encoded (http%253A%252F%252F...)
-    - "(?i)https?%253a%252f%252f(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
-    - "(?i)https?%253a%252f%252f169\\.254\\.169\\.254"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)%253a%252f%252f(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)%253a%252f%252f169\\.254\\.169\\.254"
+
+    # =========================================================
+    # Numeric-IP loopback bypass — filters that only string-match
+    # "127.0.0.1"/"localhost" are evaded by decimal/hex forms of the
+    # same address (2130706433 == 127.0.0.1 as a 32-bit integer)
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)(?:://|%3a%2f%2f)2130706433\\b"
+    - "(?i)(?:https?|gopher|dict|ftp|ldap)(?:://|%3a%2f%2f)0x7f(?:\\.?0+){0,3}1\\b"
 
 
 
@@ -235,6 +378,10 @@ rules:
     - "\\{\\{[^\\}]{1,400}\\}\\}"
     - "\\{\\%[^\\%]{1,400}\\%\\}"
     - "(?i)%7b%7b.{1,800}?%7d%7d"
+    # Java EL / Freemarker / Thymeleaf style ${...} SSTI probe, e.g. "${7*7}".
+    # Requires an arithmetic operator inside the braces so plain "${variable}"
+    # placeholders (and shell $\{PATH\}-style expansion) don't also match.
+    - "\\$\\{[^}]{0,40}[*+/-][^}]{0,40}\\}"
 
 - id: "SSTI_PYTHON_INTROSPECTION"
   category: "ssti"
@@ -303,13 +450,6 @@ rules:
     - "(?i)^/\\.svn/"
     - "(?i)^/\\.hg/"
 
-- id: "SCAN_CONFIG_BACKUPS"
-  category: "scan"
-  regex: true
-  targets: ["path", "uri"]
-  patterns:
-    - "\\.(?:bak|old|backup|swp|tmp)$"
-
 - id: "SCAN_DEBUG_ENDPOINTS"
   category: "scan"
   regex: true
@@ -320,7 +460,26 @@ rules:
     - "(?i)^/swagger-ui"
     - "(?i)^/api-docs"
     - "(?i)^/actuator"
+    - "(?i)^/server-status"
+    - "(?i)^/server-info"
 
+
+- id: "SCAN_CONFIG_BACKUPS"
+  category: "scan"
+  regex: true
+  targets: ["path", "uri"]
+  # Placed last in the file (lowest priority under first-match-wins).
+  # Anchoring to the final path segment alone (previous fix) was not enough:
+  # a re-eval still showed 15/15 hits on ordinary app resources renamed with
+  # a backup extension (photos, product/page names — e.g. "carrito.jsp/
+  # asf-logo-wide.gif.Bak", "tienda1.OLD") and zero of the missed true
+  # positives were backup-scan related, i.e. this bare-extension form had a
+  # 0% true-positive rate in this dataset. Now additionally require the
+  # filename stem to look like a config/backup-worthy asset (source/config
+  # file, not an image or arbitrary page name) so it only fires on things
+  # like "config.bak", "web.config.old", "wp-config.php.bak", "database.sql.bak".
+  patterns:
+    - "(?i)/[\\w-]*(?:config|backup|settings|database|credentials?|secrets?|passwd|dump|\\.sql)[\\w.-]*\\.(?:bak|old|backup|swp|tmp)$"
 
 # ============================================================
 # Brute-force (URI hints – complements log-based BF detection)
