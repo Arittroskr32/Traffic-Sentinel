@@ -493,3 +493,21 @@ Used for inspection, overrides, and maintenance.
 
 ---
 
+## 📚 References & Citation
+
+If you use Traffic-Sentinel in your research or projects, please cite:
+
+```bibtex
+@misc{arittroskr32_trafficsentinel_github,
+  author       = {{Arittroskr32}},
+  title        = {{Traffic-Sentinel}},
+  howpublished = {GitHub Repository},
+  year         = {2026},
+  url          = {https://github.com/Arittroskr32/Traffic-Sentinel},
+  note         = {Log-based, rule-driven web traffic detection engine with per-IP reputation scoring and configurable enforcement}
+}
+```
+
+---
+
+
